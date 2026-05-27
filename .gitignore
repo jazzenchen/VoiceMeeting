@@ -1,0 +1,64 @@
+# macOS
+.DS_Store
+.AppleDouble
+._*
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+apple-sign.config
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / frontend
+node_modules/
+frontend/node_modules/
+tauri/node_modules/
+frontend/dist/
+dist/
+
+# Tauri / Rust
+tauri/src-tauri/target/
+tauri/src-tauri/resources/voice-meeting-server/
+tauri/src-tauri/binaries/voice-meeting-server-*
+tauri/src-tauri/gen/
+*.dmg
+*.app
+
+# PyInstaller
+backend/build/
+backend/dist/
+voice-meeting-server.spec
+
+# Local app data
+data/
+models/
+*.sqlite
+*.sqlite3
+*.db
+*.wav
+*.webm
+*.m4a
+*.mp3
+*.mp4
+
+# Logs and temporary files
+*.log
+logs/
+tmp/
+temp/
+
+# Local automation / browser artifacts
+.playwright-cli/
+playwright-report/
+test-results/

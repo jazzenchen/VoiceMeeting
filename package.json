@@ -1,0 +1,14 @@
+{
+  "name": "voice-meeting",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "setup": "./scripts/setup.sh",
+    "dev": "./scripts/dev.sh",
+    "dev:desktop": "./scripts/dev-desktop.sh",
+    "build:server": "./scripts/build-server.sh",
+    "build:desktop": "./scripts/build-server.sh && cd tauri && bun install && bun run tauri build --bundles app",
+    "backend": ".venv/bin/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8788",
+    "frontend": "cd frontend && VITE_API_BASE=http://127.0.0.1:8788 bun run dev --host 127.0.0.1 --port 5199"
+  }
+}

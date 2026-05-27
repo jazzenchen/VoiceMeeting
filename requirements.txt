@@ -1,0 +1,12 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+httpx==0.28.1
+requests==2.32.5
+websockets==15.0.1
+faster-whisper==1.1.1
+mlx-whisper==0.4.3; platform_system == "Darwin" and platform_machine == "arm64"
+resemblyzer==0.1.4
+opencc-python-reimplemented==0.1.7
+pydantic==2.10.5
+imageio-ffmpeg==0.6.0
