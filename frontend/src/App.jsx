@@ -258,6 +258,18 @@ function asrModelName(model) {
   return names[model] || model;
 }
 
+function firstInstalledAsrModel(models, preferredModel) {
+  const installed = new Set(
+    (models || [])
+      .filter((item) => item?.installed)
+      .map((item) => item.name || item.id)
+      .filter(Boolean),
+  );
+  if (preferredModel && installed.has(preferredModel)) return preferredModel;
+  if (installed.has(DEFAULT_RECORDING_CONFIG.asrModel)) return DEFAULT_RECORDING_CONFIG.asrModel;
+  return ASR_MODEL_ORDER.find((model) => installed.has(model)) || "";
+}
+
 function asrBackendLabel(value) {
   if (value === "mlx") return "Mac MLX 模型";
   if (value === "faster-whisper") return "通用模型";
@@ -379,6 +391,9 @@ function userFriendlyError(message) {
   if (lower.includes("unsupported asr language")) return "当前语言暂不支持，请换一种语言设置。";
   if (lower.includes("asr model is not available locally")) return "本地还没有这套识别资源，请选择已有的识别方式。";
   if (lower.includes("unsupported asr model")) return "当前识别方式不可用，请换一个选项。";
+  if (lower === "not found" || lower.includes('"not found"')) {
+    return "当前本地语音服务版本过旧，请完全退出旧版 VoiceMeeting 后重新打开。";
+  }
   if (lower.includes("ffmpeg") || lower.includes("invalid data") || lower.includes("error opening input")) {
     return "音频文件无法读取，请换一个常见格式，或重新录制。";
   }
@@ -808,6 +823,7 @@ function App() {
   const previousSettingsOpenRef = useRef(false);
   const llmStatusLoadedRef = useRef(false);
   const serviceReadyOnceRef = useRef(false);
+  const startupModelLoadAttemptedRef = useRef(false);
   const autoLoadedMeetingRef = useRef(false);
   const completedReprocessRef = useRef("");
 
@@ -937,8 +953,23 @@ function App() {
       || reprocessWorking
       || activeModelDownload,
   );
+  const normalizedRecordingConfig = clampRecordingConfig(recordingConfig);
   const serviceReady = status.backend === "ready";
   const serviceStarting = status.backend === "starting" || status.backend === "checking";
+  const modelLoadBusy = modelLoadState?.status === "loading";
+  const llmReady = status.vibe === "ready";
+  const llmUnavailableReason = llmReady ? "" : status.vibeDetail || "会议助手不可用，请在设置里配置纪要大模型。";
+  const asrReady = serviceReady && Boolean(loadedAsrModelMeta?.loaded || modelStatus?.loaded);
+  const preferredStartupAsrModel = firstInstalledAsrModel(modelCatalogAsr, normalizedRecordingConfig.asrModel);
+  const asrUnavailableReason = !serviceReady
+    ? "本地语音服务还在启动中，请稍候。"
+    : modelLoadBusy
+      ? "识别模型正在加载，请稍候。"
+      : selectableAsrModels.length === 0
+        ? "本地还没有可用的识别模型，请先在设置里下载模型。"
+        : asrReady
+          ? ""
+          : "识别模型尚未加载，请先在设置里加载模型。";
   const servicePillClass = serviceStarting ? "working pulse-pill" : status.backend;
   const trimmedTitle = title.trim();
   const titleDirty = Boolean(meeting?.id && trimmedTitle && trimmedTitle !== meeting.title);
@@ -1062,6 +1093,9 @@ function App() {
   const refreshStatus = useCallback(async () => {
     try {
       const health = await api("/api/health");
+      if (Number(health?.api_revision || 0) < 2) {
+        throw new Error("当前本地语音服务版本过旧，请完全退出旧版 VoiceMeeting 后重新打开。");
+      }
       serviceReadyOnceRef.current = true;
       setModelStatus(health.asr || null);
 
@@ -1213,10 +1247,29 @@ function App() {
   }, []);
 
   const loadRecordingAsrModel = useCallback(
-    async (model) => {
+    async (model, options = {}) => {
       const cleanModel = String(model || "").trim();
-      if (!cleanModel || recording || busy || importingAudio) return;
+      const startup = options.source === "startup";
+      if (!cleanModel || modelLoadState?.status === "loading") return;
+      if (!startup && (recording || busy || importingAudio)) return;
       const targetMeta = modelCatalogByKey.get(`asr:${cleanModel}`);
+      if (targetMeta && !targetMeta.installed) {
+        const message = "本地还没有这套识别资源，请先下载模型。";
+        setError(message);
+        setModelLoadState({
+          status: "error",
+          source: options.source || "switch",
+          targetModel: cleanModel,
+          targetLabel: targetMeta.label || asrModelName(cleanModel),
+          previousLabel: "",
+          error: message,
+        });
+        return;
+      }
+      if (!startup && loadedAsrModelMeta?.name === cleanModel && loadedAsrModelMeta?.loaded) {
+        setRecordingConfig((current) => clampRecordingConfig({ ...current, asrModel: cleanModel }));
+        return;
+      }
       const targetLabel = targetMeta?.label || asrModelName(cleanModel);
       const previousLabel = loadedAsrModelMeta && loadedAsrModelMeta.name !== cleanModel
         ? loadedAsrModelMeta.label || asrModelName(loadedAsrModelMeta.name)
@@ -1224,6 +1277,7 @@ function App() {
       setError("");
       setModelLoadState({
         status: "loading",
+        source: options.source || "switch",
         targetModel: cleanModel,
         targetLabel,
         previousLabel,
@@ -1240,16 +1294,25 @@ function App() {
         setPipelineStatus(`${targetLabel} 已加载`);
         setModelLoadState({
           status: "success",
+          source: options.source || "switch",
           targetModel: cleanModel,
           targetLabel: result.label || targetLabel,
           previousLabel: (result.unloaded || [])[0]?.label || previousLabel,
         });
         await refreshStatus();
+        if (options.autoClose) {
+          window.setTimeout(() => {
+            setModelLoadState((current) => (
+              current?.status === "success" && current?.targetModel === cleanModel ? null : current
+            ));
+          }, 650);
+        }
       } catch (err) {
         const message = userFriendlyError(err.message);
         setError(message);
         setModelLoadState({
           status: "error",
+          source: options.source || "switch",
           targetModel: cleanModel,
           targetLabel,
           previousLabel,
@@ -1257,8 +1320,31 @@ function App() {
         });
       }
     },
-    [busy, importingAudio, loadedAsrModelMeta, modelCatalogByKey, recording, refreshStatus],
+    [busy, importingAudio, loadedAsrModelMeta, modelCatalogByKey, modelLoadState?.status, recording, refreshStatus],
   );
+
+  useEffect(() => {
+    if (!serviceReady || startupModelLoadAttemptedRef.current || modelLoadBusy) return;
+    if (!modelCatalogAsr.length) return;
+    if (loadedAsrModelMeta?.loaded) {
+      startupModelLoadAttemptedRef.current = true;
+      return;
+    }
+    startupModelLoadAttemptedRef.current = true;
+    if (!preferredStartupAsrModel) {
+      setPipelineStatus("识别模型未安装");
+      setError("本地还没有可用的识别模型，请先在设置里下载模型。");
+      return;
+    }
+    loadRecordingAsrModel(preferredStartupAsrModel, { source: "startup", autoClose: true });
+  }, [
+    loadRecordingAsrModel,
+    loadedAsrModelMeta?.loaded,
+    modelCatalogAsr.length,
+    modelLoadBusy,
+    preferredStartupAsrModel,
+    serviceReady,
+  ]);
 
   const updateAppearance = useCallback((field, value) => {
     setAppearance((current) => clampAppearance({ ...current, [field]: value }));
@@ -1495,6 +1581,18 @@ function App() {
     async (level) => {
       const id = meeting?.id;
       if (!id || reprocessBusy) return;
+      if (level === "asr" && !asrReady) {
+        setError(asrUnavailableReason || "识别模型尚未加载，请先在设置里加载模型。");
+        setSettingsTab("recording");
+        setSettingsOpen(true);
+        return;
+      }
+      if ((level === "repair" || level === "notes") && !llmReady) {
+        setError(llmUnavailableReason);
+        setSettingsTab("llm");
+        setSettingsOpen(true);
+        return;
+      }
       const labels = {
         asr: "重新识别",
         speaker: "说话人校准",
@@ -1540,6 +1638,10 @@ function App() {
     [
       meeting?.active_version_id,
       meeting?.id,
+      asrReady,
+      asrUnavailableReason,
+      llmReady,
+      llmUnavailableReason,
       refreshMeeting,
       refreshMeetings,
       refreshRuntime,
@@ -1930,6 +2032,12 @@ function App() {
       setError("本地语音服务还在启动中，请稍候。");
       return;
     }
+    if (!asrReady) {
+      setError(asrUnavailableReason || "识别模型尚未加载，请先在设置里加载模型。");
+      setSettingsTab("recording");
+      setSettingsOpen(true);
+      return;
+    }
     if (recording || busy || importingAudio) return;
     if (!(await ensureRecordingModels())) return;
     setBusy(true);
@@ -2035,11 +2143,19 @@ function App() {
     refreshMicDevices,
     selectMicDevice,
     selectedMicId,
+    asrReady,
+    asrUnavailableReason,
     serviceReady,
   ]);
 
   const runFinalize = useCallback(async (id, { allowWhileRecording = false } = {}) => {
     if (!id || finalizing) return;
+    if (!llmReady) {
+      setError(llmUnavailableReason);
+      setSettingsTab("llm");
+      setSettingsOpen(true);
+      return;
+    }
     if (recording && !allowWhileRecording) {
       setError("请先停止录音，再生成纪要。");
       return;
@@ -2093,7 +2209,7 @@ function App() {
     } finally {
       setFinalizing(false);
     }
-  }, [finalizing, recording, refreshMeeting, refreshMeetings]);
+  }, [finalizing, llmReady, llmUnavailableReason, recording, refreshMeeting, refreshMeetings]);
 
   const stopRecording = useCallback(async () => {
     if (!recording) return;
@@ -2458,6 +2574,12 @@ function App() {
         setError("本地语音服务还在启动中，请稍候。");
         return;
       }
+      if (!asrReady) {
+        setError(asrUnavailableReason || "识别模型尚未加载，请先在设置里加载模型。");
+        setSettingsTab("recording");
+        setSettingsOpen(true);
+        return;
+      }
       setError("");
       setImportingAudio(true);
       setPipelineStatus("准备导入音频");
@@ -2508,7 +2630,18 @@ function App() {
         setImportingAudio(false);
       }
     },
-    [enqueueChunk, ensureRecordingModels, importingAudio, recording, refreshMeeting, refreshMeetings, refreshRuntime, serviceReady],
+    [
+      asrReady,
+      asrUnavailableReason,
+      enqueueChunk,
+      ensureRecordingModels,
+      importingAudio,
+      recording,
+      refreshMeeting,
+      refreshMeetings,
+      refreshRuntime,
+      serviceReady,
+    ],
   );
 
   const downloadMeetingFile = useCallback(
@@ -2540,7 +2673,6 @@ function App() {
 
   const micLevel = Math.min(1, Math.max(0.08, vadLevel * 18));
   const missingRecordingModels = missingModelsForConfig(recordingConfig);
-  const normalizedRecordingConfig = clampRecordingConfig(recordingConfig);
   const maxSegmentSeconds = Math.round(normalizedRecordingConfig.maxSegmentMs / 1000);
   const selectedMicDeviceIndex = micDevices.findIndex((device) => device.deviceId === selectedMicId);
   const selectedMicLabel = selectedMicDeviceIndex >= 0
@@ -2609,6 +2741,8 @@ function App() {
         speakerOptions={speakerOptions}
         renameSpeaker={renameSpeaker}
         serviceReady={serviceReady}
+        recognitionReady={asrReady}
+        recognitionUnavailableReason={asrUnavailableReason}
         busy={busy}
         importingAudio={importingAudio}
         startMeeting={startMeeting}
@@ -2685,6 +2819,8 @@ function App() {
             downloadTranscript={downloadTranscript}
             transcriptDownloading={downloadBusy === "transcript"}
             recording={recording}
+            recognitionReady={asrReady}
+            recognitionUnavailableReason={asrUnavailableReason}
             reprocessWorking={reprocessWorking}
             startReprocess={startReprocess}
             createEditableVersion={createEditableVersion}
@@ -2711,6 +2847,8 @@ function App() {
             finalize={finalize}
             meeting={meeting}
             recording={recording}
+            assistantReady={llmReady}
+            assistantUnavailableReason={llmUnavailableReason}
             finalizing={finalizing}
             downloadNotes={downloadNotes}
             notesDownloading={downloadBusy === "notes"}

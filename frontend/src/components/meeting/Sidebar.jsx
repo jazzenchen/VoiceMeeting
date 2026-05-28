@@ -71,6 +71,8 @@ export function Sidebar({
   meetings,
   recording,
   serviceReady,
+  recognitionReady,
+  recognitionUnavailableReason,
   busy,
   importingAudio,
   startMeeting,
@@ -94,6 +96,11 @@ export function Sidebar({
   const reprocessActive = Boolean(reprocess && ["queued", "running"].includes(reprocess.status));
   const processing = pendingChunks > 0 || Boolean(runtimeStatus?.active_chunks?.length) || reprocessActive;
   const runtimeText = runtimeLine(runtimeStatus, pendingChunks, t);
+  const recordingUnavailable = !serviceReady
+    ? t("本地语音服务还在启动中，请稍候。")
+    : !recognitionReady
+      ? recognitionUnavailableReason
+      : "";
 
   return (
     <aside className="sidebar rail">
@@ -136,13 +143,15 @@ export function Sidebar({
               type="button"
               className="new-rec-btn"
               onClick={startMeeting}
-              disabled={!serviceReady || busy || importingAudio || processing}
+              disabled={!serviceReady || !recognitionReady || busy || importingAudio || processing}
+              title={recordingUnavailable || t("新建录音")}
             >
               <Mic size={15} />
               <span>{busy ? t("启动中") : t("新建录音")}</span>
             </Button>
             <label
-              className={`import-btn ${serviceReady && !busy && !importingAudio && !processing ? "" : "disabled"}`}
+              className={`import-btn ${serviceReady && recognitionReady && !busy && !importingAudio && !processing ? "" : "disabled"}`}
+              title={recordingUnavailable || t("导入音频文件")}
             >
               <FileAudio size={13} />
               <span>{importingAudio ? t("导入中") : t("导入音频文件")}</span>
@@ -150,9 +159,15 @@ export function Sidebar({
                 type="file"
                 accept="audio/*,video/*"
                 onChange={uploadAudioFile}
-                disabled={!serviceReady || busy || importingAudio || processing}
+                disabled={!serviceReady || !recognitionReady || busy || importingAudio || processing}
               />
             </label>
+            {recordingUnavailable && serviceReady && !processing && !importingAudio && (
+              <div className="proc-mini warn">
+                <span className="spin" />
+                <span className="label">{recordingUnavailable}</span>
+              </div>
+            )}
             {(processing || importingAudio) && (
               <div className="proc-mini">
                 <span className="spin" />

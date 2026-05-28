@@ -6,7 +6,12 @@ export function ModelLoadDialog({ state, onClose }) {
   if (!state) return null;
   const loading = state.status === "loading";
   const success = state.status === "success";
-  const title = loading ? t("正在准备识别模型") : success ? t("模型加载成功") : t("模型加载失败");
+  const startup = state.source === "startup";
+  const title = loading
+    ? (startup ? t("正在启动识别模型") : t("正在准备识别模型"))
+    : success
+      ? t("模型加载成功")
+      : t("模型加载失败");
   const targetLabel = t(state.targetLabel);
   const previousLabel = t(state.previousLabel);
 
@@ -26,7 +31,9 @@ export function ModelLoadDialog({ state, onClose }) {
           <p>
             {success
               ? t("{model} 已加载，可以开始识别。", { model: targetLabel })
-              : t("正在加载 {model}，请稍候。", { model: targetLabel })}
+              : loading
+                ? t("正在加载 {model}，请稍候。", { model: targetLabel })
+                : t("{model} 没有加载完成，相关识别功能暂不可用。", { model: targetLabel })}
           </p>
         </div>
 

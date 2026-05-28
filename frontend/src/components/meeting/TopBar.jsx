@@ -104,23 +104,23 @@ export function TopBar({
         <Button
           type="button"
           variant="ghost"
+          size="sm"
+          className="icon-btn language-btn"
+          onClick={onToggleLanguage}
+          title={locale === "zh" ? t("切换英文") : t("切换中文")}
+        >
+          <Languages size={14} />
+          <span>{locale === "zh" ? "EN" : "中"}</span>
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
           size="icon"
           className="icon-btn"
           onClick={onToggleTheme}
           title={appearance?.theme === "dark" ? t("切换浅色") : t("切换深色")}
         >
           {appearance?.theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="icon-btn language-btn"
-          onClick={onToggleLanguage}
-          title={locale === "zh" ? t("切换英文") : t("切换中文")}
-        >
-          <Languages size={15} />
-          <span>{locale === "zh" ? "EN" : "中"}</span>
         </Button>
         <Button
           type="button"

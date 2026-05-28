@@ -56,6 +56,8 @@ export function TranscriptPane({
   downloadTranscript,
   transcriptDownloading,
   recording,
+  recognitionReady,
+  recognitionUnavailableReason,
   reprocessWorking,
   startReprocess,
   createEditableVersion,
@@ -150,8 +152,8 @@ export function TranscriptPane({
             <button
               className="playback-button"
               onClick={() => startReprocess("asr")}
-              disabled={!meeting || reprocessWorking}
-              title={t("重新识别")}
+              disabled={!meeting || !recognitionReady || reprocessWorking}
+              title={recognitionUnavailableReason || t("重新识别")}
             >
               <RefreshCcw size={15} />
               <span>{t("重新识别")}</span>

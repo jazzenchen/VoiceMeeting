@@ -11,6 +11,7 @@ use tauri_plugin_shell::ShellExt;
 
 const SERVER_PORT: u16 = 8788;
 const STARTUP_TIMEOUT_SECONDS: u64 = 120;
+const REQUIRED_API_REVISION: u64 = 2;
 
 #[derive(Default)]
 struct ServerState {
@@ -186,25 +187,34 @@ fn server_url() -> String {
     format!("http://127.0.0.1:{}", SERVER_PORT)
 }
 
-fn check_health() -> bool {
+fn health_body() -> Option<serde_json::Value> {
     let url = format!("{}/api/health", server_url());
     let client = match reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(2))
         .build()
     {
         Ok(client) => client,
-        Err(_) => return false,
+        Err(_) => return None,
     };
 
     match client.get(url).send() {
-        Ok(response) if response.status().is_success() => {
-            match response.json::<serde_json::Value>() {
-                Ok(body) => body.get("ok").and_then(|value| value.as_bool()) == Some(true),
-                Err(_) => false,
-            }
-        }
-        _ => false,
+        Ok(response) if response.status().is_success() => response.json::<serde_json::Value>().ok(),
+        _ => None,
     }
+}
+
+fn compatible_health(body: &serde_json::Value) -> bool {
+    body.get("ok").and_then(|value| value.as_bool()) == Some(true)
+        && body.get("app").and_then(|value| value.as_str()) == Some("VoiceMeeting")
+        && body
+            .get("api_revision")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0)
+            >= REQUIRED_API_REVISION
+}
+
+fn check_health() -> bool {
+    health_body().as_ref().is_some_and(compatible_health)
 }
 
 fn wait_for_health(timeout: Duration) -> bool {
@@ -217,6 +227,29 @@ fn wait_for_health(timeout: Duration) -> bool {
     }
     false
 }
+
+#[cfg(unix)]
+fn terminate_port_processes() {
+    let port = SERVER_PORT.to_string();
+    let output = Command::new("lsof")
+        .args(["-ti", &format!("tcp:{port}")])
+        .output();
+
+    let Ok(output) = output else {
+        return;
+    };
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    for pid in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        println!("Stopping stale process on VoiceMeeting port {} pid={}", SERVER_PORT, pid);
+        let _ = Command::new("kill").args(["-TERM", pid]).output();
+    }
+
+    std::thread::sleep(Duration::from_millis(700));
+}
+
+#[cfg(not(unix))]
+fn terminate_port_processes() {}
 
 fn server_executable_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let resource_dir = app
@@ -240,10 +273,15 @@ fn start_server(app: &tauri::AppHandle) -> Result<String, String> {
     let state = app.state::<ServerState>();
     set_server_status(&state, "starting", "");
 
-    if check_health() {
+    if health_body().as_ref().is_some_and(compatible_health) {
         println!("Reusing existing VoiceMeeting server on {}", server_url());
         set_server_status(&state, "ready", "");
         return Ok(server_url());
+    }
+
+    if health_body().is_some() {
+        println!("Existing server on {} is incompatible; restarting VoiceMeeting sidecar", server_url());
+        terminate_port_processes();
     }
 
     let app_data_dir = app

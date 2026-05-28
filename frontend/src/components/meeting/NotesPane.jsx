@@ -19,6 +19,8 @@ export function NotesPane({
   finalize,
   meeting,
   recording,
+  assistantReady,
+  assistantUnavailableReason,
   finalizing,
   downloadNotes,
   notesDownloading,
@@ -50,8 +52,8 @@ export function NotesPane({
           <button
             className={`finish-button btn-ghost primary ${finalNotesWorking ? "working" : ""}`}
             onClick={finalize}
-            disabled={!meeting || recording || finalNotesWorking}
-            title={t("生成完整纪要")}
+            disabled={!meeting || !assistantReady || recording || finalNotesWorking}
+            title={assistantUnavailableReason || t("生成完整纪要")}
           >
             {finalNotesWorking ? <span className="notes-spinner" aria-hidden="true" /> : <FileText size={15} />}
             <span>{finalNotesWorking ? t("生成中") : t("生成纪要")}</span>
@@ -86,6 +88,8 @@ export function NotesPane({
               <p>{t("正在生成会议纪要...")}</p>
             ) : finalNotesReady ? (
               <p>{t("会议纪要已生成。")}</p>
+            ) : assistantUnavailableReason ? (
+              <p>{assistantUnavailableReason}</p>
             ) : hasContent ? (
               <p>{t("已捕捉 {count} 条转写内容。点击“生成纪要”后会基于完整文字稿生成 Markdown 纪要。", { count: transcriptPartsList.length })}</p>
             ) : (

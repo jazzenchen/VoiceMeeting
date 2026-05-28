@@ -130,6 +130,11 @@ class FasterWhisperASR:
             "last_error": self.last_error,
         }
 
+    def require_loaded(self) -> Any:
+        if self._model is None or not self.loaded:
+            raise ASRUnavailable("识别模型尚未加载，请先在设置中加载模型。")
+        return self._model
+
     def convert_to_wav(self, source: Path, destination: Path) -> None:
         ffmpeg = ffmpeg_path()
         if ffmpeg is None:
@@ -168,7 +173,7 @@ class FasterWhisperASR:
         language: Optional[str] = None,
         context_prompt: str = "",
     ) -> Dict[str, Any]:
-        model = self._load_model()
+        model = self.require_loaded()
         requested_language = self.language if language is None else language
         mixed_language = requested_language in {"mixed", "zh-en", "bilingual"}
         auto_language = requested_language in {None, "auto", "multilingual"}
@@ -493,7 +498,7 @@ class MlxWhisperASR(FasterWhisperASR):
         language: Optional[str] = None,
         context_prompt: str = "",
     ) -> Dict[str, Any]:
-        self._load_model()
+        self.require_loaded()
         requested_language = self.language if language is None else language
         mixed_language = requested_language in {"mixed", "zh-en", "bilingual"}
         auto_language = requested_language in {None, "auto", "multilingual"}

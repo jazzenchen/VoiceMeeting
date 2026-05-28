@@ -1191,6 +1191,10 @@ async def delete_model(kind: str, model: str) -> Dict[str, Any]:
 async def health() -> Dict[str, Any]:
     return {
         "ok": True,
+        "app": "VoiceMeeting",
+        "version": "0.0.1",
+        "api_revision": 2,
+        "features": ["models.load", "native-save", "i18n"],
         "project_dir": str(PROJECT_DIR),
         "asr_model": ASR_MODEL,
         "asr": {**asr.status(), "available_models": local_asr_models()},
@@ -1429,6 +1433,10 @@ async def start_reprocess_job(
         if requested_language not in SUPPORTED_ASR_LANGUAGES:
             raise HTTPException(status_code=400, detail="当前语言暂不支持，请换一种语言设置。")
         requested_model = resolve_asr_model(payload.asr_model)
+        try:
+            require_loaded_asr_engine(requested_model)
+        except ASRUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc))
         source_version_id = payload.source_version_id or meeting.get("active_version_id") or "auto"
         try:
             store.get_transcript_version(meeting_id, source_version_id)
@@ -1837,6 +1845,16 @@ async def upload_chunk(
     except KeyError:
         raise HTTPException(status_code=404, detail="找不到这场会议，可能已经被删除。")
 
+    requested_language = (language or "zh").strip().lower()
+    if requested_language not in SUPPORTED_ASR_LANGUAGES:
+        raise HTTPException(status_code=400, detail="当前语言暂不支持，请换一种语言设置。")
+    requested_model = resolve_asr_model(asr_model)
+    requested_speaker_mode = resolve_speaker_mode(speaker_mode)
+    try:
+        asr_engine = require_loaded_asr_engine(requested_model)
+    except ASRUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
     audio_bytes = await audio.read()
     if not audio_bytes:
         raise HTTPException(status_code=400, detail="这段音频为空，请重新录制或导入。")
@@ -1861,14 +1879,7 @@ async def upload_chunk(
         wav_path = audio_path.with_name(f"{audio_path.stem}_16k.wav")
     else:
         wav_path = audio_path.with_suffix(".wav")
-    requested_language = (language or "zh").strip().lower()
-    if requested_language not in SUPPORTED_ASR_LANGUAGES:
-        raise HTTPException(status_code=400, detail="当前语言暂不支持，请换一种语言设置。")
-    requested_model = resolve_asr_model(asr_model)
-    requested_speaker_mode = resolve_speaker_mode(speaker_mode)
-
     try:
-        asr_engine = asr_engine_for_model(requested_model)
         store.update_chunk(chunk["id"], status="converting")
         asr.convert_to_wav(audio_path, wav_path)
         store.update_chunk(chunk["id"], wav_path=str(wav_path), status="transcribing")
@@ -2033,6 +2044,13 @@ def loaded_asr_engine_items() -> list[tuple[str, FasterWhisperASR]]:
     return items
 
 
+def require_loaded_asr_engine(model_name: str) -> FasterWhisperASR:
+    engine = asr_engine_for_model(model_name)
+    if not engine.loaded:
+        raise ASRUnavailable("识别模型尚未加载，请先在设置中加载模型。")
+    return engine
+
+
 @app.post("/api/models/load")
 async def load_model(payload: ModelDownloadRequest) -> Dict[str, Any]:
     kind = clean_identifier(payload.kind or "asr", "asr")
@@ -2082,7 +2100,7 @@ async def reprocess_asr_version(
     assigned_total = 0
     created_total = 0
     try:
-        asr_engine = asr_engine_for_model(model_name)
+        asr_engine = require_loaded_asr_engine(model_name)
         meeting = store.get_meeting(meeting_id)
         chunks = [
             chunk
