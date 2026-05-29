@@ -273,9 +273,31 @@ function firstInstalledAsrModel(models, preferredModel) {
       .map((item) => item.name || item.id)
       .filter(Boolean),
   );
-  if (preferredModel && installed.has(preferredModel)) return preferredModel;
-  if (installed.has(DEFAULT_RECORDING_CONFIG.asrModel)) return DEFAULT_RECORDING_CONFIG.asrModel;
-  return ASR_MODEL_ORDER.find((model) => installed.has(model)) || "";
+  const preferred = String(preferredModel || "").trim();
+  const defaultModel = DEFAULT_RECORDING_CONFIG.asrModel;
+  const preferredBase = preferred.replace(/^mlx-/, "");
+  const defaultBase = defaultModel.replace(/^mlx-/, "");
+  const lowPrecisionPreferred = new Set(["tiny", "base", "mlx-tiny", "mlx-base"]).has(preferred);
+  const preferredCandidates = [
+    preferred,
+    preferred && !preferred.startsWith("mlx-") ? `mlx-${preferred}` : "",
+    preferred.startsWith("mlx-") ? preferredBase : "",
+  ];
+  const priority = [
+    ...(lowPrecisionPreferred ? [] : preferredCandidates),
+    defaultModel,
+    defaultModel && !defaultModel.startsWith("mlx-") ? `mlx-${defaultModel}` : "",
+    defaultModel.startsWith("mlx-") ? defaultBase : "",
+    "mlx-small",
+    "small",
+    "mlx-base",
+    "base",
+    "mlx-tiny",
+    "tiny",
+    ...(lowPrecisionPreferred ? preferredCandidates : []),
+    ...ASR_MODEL_ORDER,
+  ].filter(Boolean);
+  return priority.find((model) => installed.has(model)) || "";
 }
 
 function asrBackendLabel(value) {
@@ -1351,7 +1373,10 @@ function App() {
   useEffect(() => {
     if (!serviceReady || startupModelLoadAttemptedRef.current || modelLoadBusy) return;
     if (!modelCatalogAsr.length) return;
-    if (selectedAsrModelLoaded) {
+    if (
+      selectedAsrModelLoaded
+      && (!preferredStartupAsrModel || preferredStartupAsrModel === normalizedRecordingConfig.asrModel)
+    ) {
       startupModelLoadAttemptedRef.current = true;
       return;
     }
@@ -1366,6 +1391,7 @@ function App() {
     loadRecordingAsrModel,
     modelCatalogAsr.length,
     modelLoadBusy,
+    normalizedRecordingConfig.asrModel,
     preferredStartupAsrModel,
     selectedAsrModelLoaded,
     serviceReady,

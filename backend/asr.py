@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import wave
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -24,6 +25,9 @@ from .media_tools import ffmpeg_path
 SAMPLE_RATE = 16000
 ASR_CONTEXT_MAX_CHARS = 360
 ASR_CONTEXT_MIN_SPEECH_MS = 1200
+PROMPT_ECHO_MIN_CHARS = 10
+PROMPT_ECHO_COVERAGE = 0.88
+PROMPT_ECHO_RATIO = 0.45
 MIXED_LANGUAGE_PROMPT = (
     "这是会议录音转写。请使用简体中文；如果听到英文单词、产品名、"
     "人名、代码、模型名或缩写，请保留原始英文，不要翻译或音译。"
@@ -36,6 +40,10 @@ HALLUCINATION_MARKERS = (
     "请保留原始英文",
     "保留原始英文单词",
     "不要翻译或音译",
+    "这是一次会议录音转写",
+    "会议转写上下文",
+    "请尽量保留原语言",
+    "不要把英文或其他语言翻译成中文",
     "请建议一个任务",
     "欢迎订阅",
     "请不客点赞",
@@ -45,6 +53,15 @@ HALLUCINATION_MARKERS = (
     "打赏支持明镜",
     "点点栏目",
     "明镜与点点",
+)
+PROMPT_ECHO_MARKERS = (
+    "这是一次会议录音转写",
+    "会议转写上下文",
+    "请尽量保留原语言",
+    "不要把英文或其他语言翻译成中文",
+    "transcribe each utterance",
+    "do not translate",
+    "preserve code-switching",
 )
 
 MLX_MODEL_REPOS = {
@@ -219,6 +236,8 @@ class FasterWhisperASR:
             avg_logprob = getattr(item, "avg_logprob", None)
             compression_ratio = getattr(item, "compression_ratio", None)
             duration_ms = int(float(item.end or 0.0) * 1000) - int(float(item.start or 0.0) * 1000)
+            if self.is_prompt_echo(text, initial_prompt):
+                continue
             if self.is_likely_hallucination(
                 text,
                 no_speech_prob,
@@ -335,6 +354,34 @@ class FasterWhisperASR:
                     return True
                 index += 1
         return False
+
+    def is_prompt_echo(self, text: str, context_prompt: Optional[str]) -> bool:
+        compact_text = self.compact_prompt_echo_text(text)
+        compact_prompt = self.compact_prompt_echo_text(context_prompt or "")
+        if (
+            len(compact_text) < PROMPT_ECHO_MIN_CHARS
+            or len(compact_prompt) < PROMPT_ECHO_MIN_CHARS
+        ):
+            return False
+        if compact_text in compact_prompt or compact_prompt in compact_text:
+            return True
+
+        markers = tuple(
+            item
+            for item in (self.compact_prompt_echo_text(marker) for marker in PROMPT_ECHO_MARKERS)
+            if item
+        )
+        if not any(marker in compact_text for marker in markers):
+            return False
+
+        matcher = SequenceMatcher(None, compact_text, compact_prompt)
+        matched_chars = sum(block.size for block in matcher.get_matching_blocks())
+        coverage = matched_chars / max(1, len(compact_text))
+        return coverage >= PROMPT_ECHO_COVERAGE and matcher.ratio() >= PROMPT_ECHO_RATIO
+
+    def compact_prompt_echo_text(self, value: Any) -> str:
+        simplified = self.to_simplified(str(value or "")).lower()
+        return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", simplified)
 
     def clean_context_prompt(self, context_prompt: str) -> Optional[str]:
         text = re.sub(r"\s+", " ", str(context_prompt or "")).strip()
@@ -549,6 +596,8 @@ class MlxWhisperASR(FasterWhisperASR):
             avg_logprob = item.get("avg_logprob")
             compression_ratio = item.get("compression_ratio")
             duration_ms = int(float(item.get("end") or 0.0) * 1000) - int(float(item.get("start") or 0.0) * 1000)
+            if self.is_prompt_echo(text, initial_prompt):
+                continue
             if self.is_likely_hallucination(
                 text,
                 no_speech_prob,
@@ -695,6 +744,12 @@ class FunASRASR(FasterWhisperASR):
 
         result = model.generate(**kwargs)
         segments = self._segments_from_result(result, wav_path)
+        if hotword:
+            segments = [
+                segment
+                for segment in segments
+                if not self.is_prompt_echo(segment.get("text", ""), hotword)
+            ]
         return {
             "requested_language": language or self.language or "auto",
             "backend": "funasr",

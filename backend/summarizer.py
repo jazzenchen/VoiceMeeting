@@ -123,9 +123,7 @@ ASK_PROMPT = """
 """.strip()
 
 
-ASR_CONTEXT_PROMPT = """
-这是一次会议录音转写。请尽量保留原语言、产品名、人名、公司名、技术术语和数字，不要把英文或其他语言翻译成中文。
-""".strip()
+ASR_CONTEXT_PROMPT = ""
 
 
 DEFAULT_PROMPTS = {
