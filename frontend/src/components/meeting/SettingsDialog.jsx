@@ -19,7 +19,6 @@ import {
   llmProviderLabel,
   micDeviceLabel,
   progressPercent,
-  speakerModeName,
 } from "@/lib/meeting-display";
 import { useI18n } from "@/lib/i18n";
 
@@ -638,37 +637,73 @@ function ModelFilesPanel({
                 key={`asr-${item.name}`}
                 item={item}
                 kind="asr"
-                metaText={`${item.name} · ${item.params} · ${bytesLabel(item.size_bytes) || item.disk}${item.repo_id ? ` · ${item.repo_id}` : ""}`}
+                metaLines={modelMetaLines(item, t)}
                 downloadModel={downloadModel}
                 deleteModel={deleteModel}
               />
             ))}
           </Fragment>
         ))}
-        {(modelCatalog?.diarization?.models || []).map((item) => (
-          <ModelRow
-            key={`diarization-${item.name}`}
-            item={item}
-            kind="diarization"
-            metaText={`${speakerModeName("diarization")} · ${bytesLabel(item.size_bytes) || item.disk}`}
-            downloadModel={downloadModel}
-            deleteModel={deleteModel}
-          />
-        ))}
+        {(modelCatalog?.diarization?.models || []).length > 0 && (
+          <>
+            <div className="model-group-title">{t("说话人分离模型")}</div>
+            {(modelCatalog?.diarization?.models || []).map((item) => (
+              <ModelRow
+                key={`diarization-${item.name}`}
+                item={item}
+                kind="diarization"
+                metaLines={modelMetaLines(item, t)}
+                downloadModel={downloadModel}
+                deleteModel={deleteModel}
+              />
+            ))}
+          </>
+        )}
       </div>
     </section>
   );
 }
 
-function ModelRow({ item, kind, metaText, downloadModel, deleteModel }) {
+function modelFileSizeText(item, t) {
+  const localSize = bytesLabel(item.size_bytes);
+  if (localSize) return `${localSize} ${t("本地")}`;
+  return item.disk || t("未知");
+}
+
+function modelMetaLines(item, t) {
+  const identity = [
+    item.name ? `${t("ID")}：${item.name}` : "",
+    item.repo_id ? `${t("来源")}：${item.repo_id}` : "",
+  ].filter(Boolean);
+  const sizing = [
+    item.params ? `${t("参数")}：${item.params}` : "",
+    `${t("文件大小")}：${modelFileSizeText(item, t)}`,
+  ].filter(Boolean);
+  const composition = [
+    item.file_breakdown || "",
+    item.components ? `${t("模型")}：${item.components}` : "",
+  ].filter(Boolean);
+
+  return [
+    identity.join(" · "),
+    sizing.join(" · "),
+    composition.length ? `${t("组成")}：${composition.join("；")}` : "",
+  ].filter(Boolean);
+}
+
+function ModelRow({ item, kind, metaLines, downloadModel, deleteModel }) {
   const { t } = useI18n();
   const active = ["queued", "running", "cancelling"].includes(item.job?.status);
+  const loading = Boolean(item.loading);
 
   return (
     <div className="model-row">
       <div className="model-main">
         <strong>{t(item.label)}</strong>
-        <small>{metaText}</small>
+        {(metaLines || []).map((line) => (
+          <small key={line}>{line}</small>
+        ))}
+        {loading && <small>{t("正在加载识别模型")}</small>}
         {active && (
           <>
             <div className="model-progress">
@@ -680,7 +715,9 @@ function ModelRow({ item, kind, metaText, downloadModel, deleteModel }) {
         {item.job?.status === "error" && <em>{item.job.error}</em>}
       </div>
       <div className="model-actions">
-        {item.installed ? (
+        {loading ? (
+          <span className="model-badge working">{t("加载中")}</span>
+        ) : item.installed ? (
           <span className="model-badge ready"><Check size={12} />{t("本地")}</span>
         ) : active ? (
           <span className="model-badge working">

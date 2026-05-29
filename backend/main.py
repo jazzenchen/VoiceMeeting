@@ -23,11 +23,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from .asr import ASRUnavailable, FasterWhisperASR, MLX_MODEL_REPOS, MlxWhisperASR
+from .asr import ASRUnavailable, FasterWhisperASR, FunASRASR, MLX_MODEL_REPOS, MlxWhisperASR
 from .config import (
     ALLOW_MODEL_DOWNLOAD,
     ASR_MODEL,
     ASR_MODEL_DIR,
+    FUNASR_MODEL_DIR,
     MLX_ASR_MODEL_DIR,
     MODELS_DIR,
     PROJECT_DIR,
@@ -148,9 +149,31 @@ MLX_ASR_MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     }
     for name, meta in ASR_MODEL_CATALOG.items()
 }
+FUNASR_MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
+    "funasr-sensevoice-small": {
+        "label": "FunASR SenseVoice",
+        "params": "主模型 234M",
+        "disk": "约 1.2GB",
+        "file_breakdown": "主模型约 897MB + VAD约 4MB + 标点约 283MB",
+        "components": "SenseVoiceSmall + fsmn-vad + ct-punc-c",
+        "profile": "实验选项，适合中文和中英混合会议；辅助使用 fsmn-vad 与 ct-punc-c",
+        "model_id": "iic/SenseVoiceSmall",
+        "repo_id": "iic/SenseVoiceSmall",
+    },
+    "funasr-paraformer-zh": {
+        "label": "FunASR Paraformer",
+        "params": "主模型 220M",
+        "disk": "约 1.2GB",
+        "file_breakdown": "主模型约 953MB + VAD约 4MB + 标点约 283MB",
+        "components": "paraformer-zh + fsmn-vad + ct-punc-c",
+        "profile": "实验选项，中文会议速度优先；辅助使用 fsmn-vad 与 ct-punc-c",
+        "model_id": "paraformer-zh",
+        "repo_id": "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+    },
+}
 SUPPORTED_ASR_MODELS = set(ASR_MODEL_CATALOG) | (
     set(MLX_ASR_MODEL_CATALOG) if MAC_MLX_ENABLED else set()
-)
+) | set(FUNASR_MODEL_CATALOG)
 ASR_MODEL_REPOS = {
     "tiny": "Systran/faster-whisper-tiny",
     "base": "Systran/faster-whisper-base",
@@ -159,6 +182,7 @@ ASR_MODEL_REPOS = {
     "large-v3": "Systran/faster-whisper-large-v3",
     "large-v3-turbo": "dropbox-dash/faster-whisper-large-v3-turbo",
 }
+FUNASR_MODEL_MARKER_DIR = FUNASR_MODEL_DIR / ".installed"
 PYANNOTE_COMMUNITY_MODEL_ID = "pyannote-community-1"
 PYANNOTE_COMMUNITY_REPO_ID = "pyannote/speaker-diarization-community-1"
 PYANNOTE_MODEL_DIR = MODELS_DIR / "pyannote" / "speaker-diarization-community-1"
@@ -167,27 +191,39 @@ PYANNOTE_MODEL_DIR = MODELS_DIR / "pyannote" / "speaker-diarization-community-1"
 def discovered_asr_models() -> set[str]:
     models: set[str] = set()
     for model_name in SUPPORTED_ASR_MODELS:
-        if any(asr_model_cache_ready(path) for path in asr_model_cache_paths(model_name)):
+        if asr_model_backend(model_name) == "funasr":
+            if funasr_model_cache_ready(model_name):
+                models.add(model_name)
+        elif any(asr_model_cache_ready(path) for path in asr_model_cache_paths(model_name)):
             models.add(model_name)
     return models
 
 
 def asr_model_backend(model_name: str) -> str:
+    if model_name.startswith("funasr-"):
+        return "funasr"
     return "mlx" if model_name.startswith("mlx-") else "faster-whisper"
 
 
 def asr_base_model_name(model_name: str) -> str:
-    return model_name.removeprefix("mlx-")
+    return model_name.removeprefix("mlx-").removeprefix("funasr-")
 
 
 def asr_model_cache_dir(model_name: str) -> Path:
-    return MLX_ASR_MODEL_DIR if asr_model_backend(model_name) == "mlx" else ASR_MODEL_DIR
+    backend = asr_model_backend(model_name)
+    if backend == "mlx":
+        return MLX_ASR_MODEL_DIR
+    if backend == "funasr":
+        return FUNASR_MODEL_DIR
+    return ASR_MODEL_DIR
 
 
 def asr_model_repos(model_name: str) -> list[str]:
     base_name = asr_base_model_name(model_name)
     if asr_model_backend(model_name) == "mlx":
         return [MLX_MODEL_REPOS.get(base_name, f"mlx-community/whisper-{base_name}-mlx")]
+    if asr_model_backend(model_name) == "funasr":
+        return [str(FUNASR_MODEL_CATALOG.get(model_name, {}).get("repo_id") or model_name)]
     return [ASR_MODEL_REPOS.get(base_name, f"Systran/faster-whisper-{base_name}")]
 
 
@@ -196,8 +232,53 @@ def asr_repo_cache_path(repo_id: str, cache_dir: Path = ASR_MODEL_DIR) -> Path:
 
 
 def asr_model_cache_paths(model_name: str) -> list[Path]:
+    if asr_model_backend(model_name) == "funasr":
+        return funasr_model_cache_paths(model_name)
     cache_dir = asr_model_cache_dir(model_name)
     return [asr_repo_cache_path(repo_id, cache_dir) for repo_id in asr_model_repos(model_name)]
+
+
+def funasr_model_marker_path(model_name: str) -> Path:
+    return FUNASR_MODEL_MARKER_DIR / f"{model_name}.json"
+
+
+def funasr_model_cache_paths(model_name: str) -> list[Path]:
+    paths = [funasr_model_marker_path(model_name)]
+    for repo_id in asr_model_repos(model_name):
+        if "/" in repo_id:
+            org, name = repo_id.split("/", 1)
+            paths.append(FUNASR_MODEL_DIR / "modelscope" / "hub" / "models" / org / name)
+            paths.append(FUNASR_MODEL_DIR / "huggingface" / "hub" / f"models--{org}--{name}")
+        else:
+            paths.append(FUNASR_MODEL_DIR / "modelscope" / "hub" / "models" / repo_id)
+    return paths
+
+
+def funasr_model_cache_ready(model_name: str) -> bool:
+    marker = funasr_model_marker_path(model_name)
+    if marker.is_file():
+        return True
+    return any(
+        path.exists() and directory_size_bytes(path) > 1024 * 1024
+        for path in funasr_model_cache_paths(model_name)
+        if path != marker
+    )
+
+
+def mark_funasr_model_installed(model_name: str) -> None:
+    FUNASR_MODEL_MARKER_DIR.mkdir(parents=True, exist_ok=True)
+    funasr_model_marker_path(model_name).write_text(
+        json.dumps(
+            {
+                "model": model_name,
+                "repo_id": asr_model_repos(model_name)[0],
+                "installed_at": now_iso(),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 
 def asr_model_cache_ready(path: Path) -> bool:
@@ -220,6 +301,11 @@ def asr_model_cache_ready(path: Path) -> bool:
 
 def asr_model_cache_path(model_name: str) -> Path:
     paths = asr_model_cache_paths(model_name)
+    if asr_model_backend(model_name) == "funasr":
+        for path in paths:
+            if path.exists():
+                return path
+        return FUNASR_MODEL_DIR
     for path in paths:
         if asr_model_cache_ready(path):
             return path
@@ -323,6 +409,7 @@ def model_catalog() -> Dict[str, Any]:
     asr_models = []
     catalog_groups: list[tuple[str, str, Dict[str, Dict[str, Any]]]] = [
         ("faster-whisper", "通用", ASR_MODEL_CATALOG),
+        ("funasr", "FunASR", FUNASR_MODEL_CATALOG),
     ]
     if MAC_MLX_ENABLED:
         catalog_groups.append(("mlx", "Apple MLX", MLX_ASR_MODEL_CATALOG))
@@ -331,6 +418,8 @@ def model_catalog() -> Dict[str, Any]:
             path = asr_model_cache_path(name)
             installed = name in installed_asr
             cached_engine = asr_engines.get(name)
+            loaded = (name == ASR_MODEL and asr.loaded) or bool(cached_engine and cached_engine.loaded)
+            loading = (name == ASR_MODEL and asr.loading) or bool(cached_engine and cached_engine.loading)
             asr_models.append(
                 {
                     "kind": "asr",
@@ -339,13 +428,16 @@ def model_catalog() -> Dict[str, Any]:
                     "label": meta["label"],
                     "params": meta["params"],
                     "disk": meta["disk"],
+                    "file_breakdown": meta.get("file_breakdown") or "",
+                    "components": meta.get("components") or "",
                     "profile": meta["profile"],
                     "installed": installed,
                     "repo_id": asr_model_repos(name)[0],
                     "path": str(path),
                     "size_bytes": directory_size_bytes(path) if installed else 0,
                     "current": name == ASR_MODEL,
-                    "loaded": (name == asr.model_name and asr.loaded) or bool(cached_engine and cached_engine.loaded),
+                    "loaded": loaded,
+                    "loading": loading,
                     "job": latest_model_job("asr", name),
                     "backend": backend,
                     "backend_label": backend_label,
@@ -359,6 +451,7 @@ def model_catalog() -> Dict[str, Any]:
         "asr": {
             "model_dir": str(ASR_MODEL_DIR),
             "mlx_model_dir": str(MLX_ASR_MODEL_DIR) if MAC_MLX_ENABLED else "",
+            "funasr_model_dir": str(FUNASR_MODEL_DIR),
             "models": asr_models,
         },
         "diarization": {
@@ -370,8 +463,10 @@ def model_catalog() -> Dict[str, Any]:
                     "name": PYANNOTE_COMMUNITY_MODEL_ID,
                     "repo_id": PYANNOTE_COMMUNITY_REPO_ID,
                     "label": "Pyannote Community-1",
-                    "params": "pipeline",
+                    "params": "pipeline（多模型组合）",
                     "disk": "约 32MB",
+                    "file_breakdown": "embedding约 25MB + segmentation约 6MB + PLDA",
+                    "components": "segmentation + embedding + PLDA",
                     "profile": "高精度说话人分离",
                     "installed": pyannote_installed,
                     "path": str(PYANNOTE_MODEL_DIR),
@@ -426,9 +521,25 @@ def cleanup_model_files(kind: str, model: str) -> None:
     paths: list[Path] = []
     lock_paths: list[Path] = []
     if kind == "asr":
-        paths = asr_model_cache_paths(model)
-        cache_dir = asr_model_cache_dir(model)
-        lock_paths = [cache_dir / ".locks" / path.name for path in paths]
+        if asr_model_backend(model) == "funasr":
+            marker = funasr_model_marker_path(model)
+            try:
+                marker.unlink()
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+            remaining = [
+                path
+                for path in FUNASR_MODEL_MARKER_DIR.glob("*.json")
+                if path.is_file()
+            ] if FUNASR_MODEL_MARKER_DIR.exists() else []
+            if not remaining:
+                paths = [FUNASR_MODEL_DIR]
+        else:
+            paths = asr_model_cache_paths(model)
+            cache_dir = asr_model_cache_dir(model)
+            lock_paths = [cache_dir / ".locks" / path.name for path in paths]
     elif kind == "diarization" and model == PYANNOTE_COMMUNITY_MODEL_ID:
         paths = [PYANNOTE_MODEL_DIR]
 
@@ -659,6 +770,23 @@ async def download_model_job(job_id: str, kind: str, model: str) -> None:
         if kind == "asr":
             if model not in SUPPORTED_ASR_MODELS:
                 raise ValueError("当前识别模型不可用。")
+            if asr_model_backend(model) == "funasr":
+                set_model_download_state(job_id, stage="加载 FunASR 模型", progress=0.2)
+                engine = asr_engine_for_model(model)
+                await asyncio.to_thread(engine.load)
+                mark_funasr_model_installed(model)
+                set_model_download_state(job_id, stage="整理模型文件", progress=0.95)
+                await asyncio.to_thread(engine.unload)
+                raise_if_model_download_cancelled(job_id)
+                set_model_download_state(
+                    job_id,
+                    status="done",
+                    stage="已安装",
+                    progress=1.0,
+                    error="",
+                    finished_at=now_iso(),
+                )
+                return
             cache_dir = asr_model_cache_dir(model)
             cache_dir.mkdir(parents=True, exist_ok=True)
             repo_id = asr_model_repos(model)[0]
@@ -958,7 +1086,7 @@ def meeting_runtime(meeting_id: str) -> Dict[str, Any]:
         "has_active_chunks": bool(active_chunks),
         "summary": summary_state,
         "reprocess": latest_reprocess_state(meeting_id),
-        "asr": {**asr.status(), "available_models": local_asr_models()},
+        "asr": active_asr_status(),
         "diarization": diarizer.status(),
         "speaker_tracking": speaker_tracker.status(),
         "llm": llm.describe(),
@@ -1197,7 +1325,7 @@ async def health() -> Dict[str, Any]:
         "features": ["models.load", "native-save", "i18n"],
         "project_dir": str(PROJECT_DIR),
         "asr_model": ASR_MODEL,
-        "asr": {**asr.status(), "available_models": local_asr_models()},
+        "asr": active_asr_status(),
         "diarization": diarizer.status(),
         "speaker_tracking": speaker_tracker.status(),
     }
@@ -2008,15 +2136,24 @@ def prepare_chunk_wav(chunk: Dict[str, Any]) -> Path:
 
 
 def asr_engine_for_model(model_name: str) -> FasterWhisperASR:
-    if model_name == asr.model_name:
+    if model_name == asr.model_name and asr_model_backend(model_name) == "faster-whisper":
         return asr
     engine = asr_engines.get(model_name)
     if engine is None:
-        if asr_model_backend(model_name) == "mlx":
+        backend = asr_model_backend(model_name)
+        if backend == "mlx":
             engine = MlxWhisperASR(
                 model_name=asr_base_model_name(model_name),
                 repo_id=asr_model_repos(model_name)[0],
                 display_name=model_name,
+            )
+        elif backend == "funasr":
+            meta = FUNASR_MODEL_CATALOG.get(model_name, {})
+            engine = FunASRASR(
+                model_name=model_name,
+                model_id=str(meta.get("model_id") or meta.get("repo_id") or model_name),
+                display_name=model_name,
+                trust_remote_code=bool(meta.get("trust_remote_code")),
             )
         else:
             runtime_model = model_name
@@ -2030,8 +2167,21 @@ def asr_engine_for_model(model_name: str) -> FasterWhisperASR:
 
 
 def asr_model_label(model_name: str) -> str:
-    meta = (MLX_ASR_MODEL_CATALOG if asr_model_backend(model_name) == "mlx" else ASR_MODEL_CATALOG).get(model_name)
+    catalogs = {
+        "mlx": MLX_ASR_MODEL_CATALOG,
+        "funasr": FUNASR_MODEL_CATALOG,
+    }
+    meta = catalogs.get(asr_model_backend(model_name), ASR_MODEL_CATALOG).get(model_name)
     return str((meta or {}).get("label") or model_name)
+
+
+def asr_engine_status(model_name: str, engine: FasterWhisperASR) -> Dict[str, Any]:
+    status = dict(engine.status())
+    status["model"] = model_name
+    status["label"] = asr_model_label(model_name)
+    if engine.model_name != model_name:
+        status["runtime_model"] = engine.model_name
+    return status
 
 
 def loaded_asr_engine_items() -> list[tuple[str, FasterWhisperASR]]:
@@ -2042,6 +2192,17 @@ def loaded_asr_engine_items() -> list[tuple[str, FasterWhisperASR]]:
         if engine.loaded:
             items.append((model_name, engine))
     return items
+
+
+def active_asr_status() -> Dict[str, Any]:
+    for model_name, engine in loaded_asr_engine_items():
+        return {**asr_engine_status(model_name, engine), "available_models": local_asr_models()}
+    if asr.loading:
+        return {**asr_engine_status(ASR_MODEL, asr), "available_models": local_asr_models()}
+    for model_name, engine in asr_engines.items():
+        if engine.loading:
+            return {**asr_engine_status(model_name, engine), "available_models": local_asr_models()}
+    return {**asr.status(), "available_models": local_asr_models()}
 
 
 def require_loaded_asr_engine(model_name: str) -> FasterWhisperASR:
@@ -2072,12 +2233,14 @@ async def load_model(payload: ModelDownloadRequest) -> Dict[str, Any]:
 
             engine = asr_engine_for_model(requested_model)
             engine.load()
+            if asr_model_backend(requested_model) == "funasr":
+                mark_funasr_model_installed(requested_model)
             return {
                 "kind": "asr",
                 "model": requested_model,
                 "label": asr_model_label(requested_model),
                 "unloaded": unloaded,
-                "status": engine.status(),
+                "status": asr_engine_status(requested_model, engine),
                 "catalog": model_catalog(),
             }
 

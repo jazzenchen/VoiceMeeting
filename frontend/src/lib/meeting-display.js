@@ -153,6 +153,13 @@ export function asrModelName(model) {
   if (String(model || "").startsWith("mlx-")) {
     return `MLX ${asrModelName(String(model).slice(4))}`;
   }
+  if (String(model || "").startsWith("funasr-")) {
+    const names = {
+      "funasr-sensevoice-small": "FunASR SenseVoice",
+      "funasr-paraformer-zh": "FunASR Paraformer",
+    };
+    return names[model] || `FunASR ${String(model).replace(/^funasr-/, "")}`;
+  }
   const names = {
     tiny: "轻量识别",
     base: "快速识别",

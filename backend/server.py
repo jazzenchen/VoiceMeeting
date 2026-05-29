@@ -101,6 +101,7 @@ def main() -> int:
     os.environ["VOICE_MEETING_MODELS_DIR"] = str(models_dir)
     os.environ["VOICE_MEETING_ASR_MODEL_DIR"] = str(models_dir / "faster-whisper")
     os.environ["VOICE_MEETING_MLX_ASR_MODEL_DIR"] = str(models_dir / "mlx-whisper")
+    os.environ["VOICE_MEETING_FUNASR_MODEL_DIR"] = str(models_dir / "funasr")
     if args.allow_model_download:
         os.environ["VOICE_MEETING_ALLOW_MODEL_DOWNLOAD"] = "1"
     os.environ.setdefault("VIBEAROUND_WORKSPACE", str(data_dir.parent))

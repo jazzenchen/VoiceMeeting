@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   Download,
@@ -11,6 +11,7 @@ import {
   SlidersHorizontal,
   Sparkles,
   Users,
+  Wrench,
   X,
 } from "lucide-react";
 
@@ -80,6 +81,8 @@ export function TranscriptPane({
 }) {
   const { t } = useI18n();
   const segmentRefs = useRef(new Map());
+  const toolsRef = useRef(null);
+  const [toolsOpen, setToolsOpen] = useState(false);
   const versions = useMemo(() => {
     if (Array.isArray(transcriptVersions) && transcriptVersions.length > 0) {
       return transcriptVersions;
@@ -122,6 +125,76 @@ export function TranscriptPane({
     node.scrollIntoView({ block: "center", behavior: "smooth" });
   }, [activeSegmentId]);
 
+  useEffect(() => {
+    if (!toolsOpen) return undefined;
+    const handlePointerDown = (event) => {
+      if (toolsRef.current?.contains(event.target)) return;
+      setToolsOpen(false);
+    };
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") setToolsOpen(false);
+    };
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [toolsOpen]);
+
+  useEffect(() => {
+    if (recording) setToolsOpen(false);
+  }, [recording]);
+
+  const advancedActions = [
+    {
+      key: "asr",
+      label: t("重新识别"),
+      icon: <RefreshCcw size={15} />,
+      disabled: !meeting || !recognitionReady || reprocessWorking,
+      title: recognitionUnavailableReason || t("重新识别"),
+      onSelect: () => startReprocess("asr"),
+    },
+    {
+      key: "speaker",
+      label: t("重新校准说话人"),
+      icon: <Users size={15} />,
+      disabled: !meeting || reprocessWorking || transcriptItems.length === 0,
+      title: t("重新校准说话人"),
+      onSelect: () => startReprocess("speaker"),
+    },
+    {
+      key: "repair",
+      label: t("自动校对文字"),
+      icon: <Sparkles size={15} />,
+      disabled: !meeting || reprocessWorking || transcriptItems.length === 0,
+      title: t("自动校对文字"),
+      onSelect: () => startReprocess("repair"),
+    },
+    {
+      key: "merge",
+      label: t("整理段落"),
+      icon: <ListTree size={15} />,
+      disabled: !meeting || reprocessWorking || transcriptItems.length === 0,
+      title: t("整理段落"),
+      onSelect: () => startReprocess("merge"),
+    },
+    {
+      key: "editable",
+      label: t("编辑副本"),
+      icon: <FilePenLine size={15} />,
+      disabled: !meeting || editableVersion || reprocessWorking || transcriptItems.length === 0,
+      title: editableVersion ? t("当前已经是可编辑稿") : t("创建可编辑副本"),
+      onSelect: createEditableVersion,
+    },
+  ];
+
+  const selectAdvancedAction = (action) => {
+    if (action.disabled) return;
+    setToolsOpen(false);
+    action.onSelect?.();
+  };
+
   return (
     <section className="transcript-pane">
       <div className="pane-header">
@@ -149,51 +222,37 @@ export function TranscriptPane({
         <div className="pane-actions transcript-tools">
           {!recording && (
             <>
-            <button
-              className="playback-button"
-              onClick={() => startReprocess("asr")}
-              disabled={!meeting || !recognitionReady || reprocessWorking}
-              title={recognitionUnavailableReason || t("重新识别")}
-            >
-              <RefreshCcw size={15} />
-              <span>{t("重新识别")}</span>
-            </button>
-            <button
-              className="playback-button"
-              onClick={() => startReprocess("speaker")}
-              disabled={!meeting || reprocessWorking || transcriptItems.length === 0}
-              title={t("重新校准说话人")}
-            >
-              <Users size={15} />
-              <span>{t("重新校准说话人")}</span>
-            </button>
-            <button
-              className="playback-button"
-              onClick={() => startReprocess("repair")}
-              disabled={!meeting || reprocessWorking || transcriptItems.length === 0}
-              title={t("自动校对文字")}
-            >
-              <Sparkles size={15} />
-              <span>{t("自动校对文字")}</span>
-            </button>
-            <button
-              className="playback-button"
-              onClick={() => startReprocess("merge")}
-              disabled={!meeting || reprocessWorking || transcriptItems.length === 0}
-              title={t("整理段落")}
-            >
-              <ListTree size={15} />
-              <span>{t("整理段落")}</span>
-            </button>
-            <button
-              className="playback-button"
-              onClick={createEditableVersion}
-              disabled={!meeting || editableVersion || reprocessWorking || transcriptItems.length === 0}
-              title={editableVersion ? t("当前已经是可编辑稿") : t("创建可编辑副本")}
-            >
-              <FilePenLine size={15} />
-              <span>{t("编辑副本")}</span>
-            </button>
+            <div className="transcript-action-menu" ref={toolsRef}>
+              <button
+                className="playback-button icon-only transcript-menu-trigger"
+                type="button"
+                onClick={() => setToolsOpen((value) => !value)}
+                disabled={!meeting}
+                title={t("高级操作")}
+                aria-label={t("高级操作")}
+                aria-haspopup="menu"
+                aria-expanded={toolsOpen}
+              >
+                <Wrench size={15} />
+              </button>
+              {toolsOpen && (
+                <div className="transcript-action-dropdown" role="menu">
+                  {advancedActions.map((action) => (
+                    <button
+                      key={action.key}
+                      type="button"
+                      role="menuitem"
+                      disabled={action.disabled}
+                      title={action.title}
+                      onClick={() => selectAdvancedAction(action)}
+                    >
+                      {action.icon}
+                      <span>{action.label}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             <button
               className="playback-button transcript-download"
               onClick={downloadTranscript}

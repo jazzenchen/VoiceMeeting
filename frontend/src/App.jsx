@@ -61,7 +61,8 @@ const SPEAKER_MODE_OPTIONS = [
 ];
 const FASTER_ASR_MODEL_ORDER = ["tiny", "base", "small", "medium", "large-v3-turbo", "large-v3"];
 const MLX_ASR_MODEL_ORDER = FASTER_ASR_MODEL_ORDER.map((model) => `mlx-${model}`);
-const ASR_MODEL_ORDER = [...FASTER_ASR_MODEL_ORDER, ...MLX_ASR_MODEL_ORDER];
+const FUNASR_MODEL_ORDER = ["funasr-sensevoice-small", "funasr-paraformer-zh"];
+const ASR_MODEL_ORDER = [...FASTER_ASR_MODEL_ORDER, ...MLX_ASR_MODEL_ORDER, ...FUNASR_MODEL_ORDER];
 const PIPELINE_STEPS = ["上传", "转码", "识别", "说话人", "纪要"];
 
 function languageName(value) {
@@ -247,6 +248,13 @@ function asrModelName(model) {
   if (String(model || "").startsWith("mlx-")) {
     return `MLX ${asrModelName(String(model).slice(4))}`;
   }
+  if (String(model || "").startsWith("funasr-")) {
+    const names = {
+      "funasr-sensevoice-small": "FunASR SenseVoice",
+      "funasr-paraformer-zh": "FunASR Paraformer",
+    };
+    return names[model] || `FunASR ${String(model).replace(/^funasr-/, "")}`;
+  }
   const names = {
     tiny: "轻量识别",
     base: "快速识别",
@@ -272,6 +280,7 @@ function firstInstalledAsrModel(models, preferredModel) {
 
 function asrBackendLabel(value) {
   if (value === "mlx") return "Mac MLX 模型";
+  if (value === "funasr") return "FunASR 模型";
   if (value === "faster-whisper") return "通用模型";
   return value || "识别模型";
 }
@@ -894,7 +903,7 @@ function App() {
       return [];
     }
     const groups = [];
-    for (const backend of ["faster-whisper", "mlx"]) {
+    for (const backend of ["faster-whisper", "mlx", "funasr"]) {
       const models = selectableAsrModels.filter((name) => modelCatalogByKey.get(`asr:${name}`)?.backend === backend);
       if (models.length > 0) {
         groups.push({
@@ -912,7 +921,7 @@ function App() {
   }, [modelCatalogAsr.length, modelCatalogByKey, selectableAsrModels]);
   const modelCatalogAsrGroups = useMemo(() => {
     const groups = [];
-    for (const backend of ["faster-whisper", "mlx"]) {
+    for (const backend of ["faster-whisper", "mlx", "funasr"]) {
       const models = modelCatalogAsr.filter((item) => item.backend === backend);
       if (models.length > 0) {
         groups.push({
@@ -937,6 +946,7 @@ function App() {
     ? modelCatalogByKey.get(`${activeModelDownload.kind}:${activeModelDownload.model}`)
     : null;
   const loadedAsrModelMeta = modelCatalogAsr.find((item) => item.loaded) || null;
+  const loadingAsrModelMeta = modelCatalogAsr.find((item) => item.loading) || null;
   const activeChunks = runtimeStatus?.active_chunks || [];
   const reprocessRuntime = runtimeStatus?.reprocess || null;
   const notesReprocessWorking = (
@@ -946,30 +956,42 @@ function App() {
   const reprocessWorking = reprocessBusy || ["queued", "running"].includes(reprocessRuntime?.status);
   const asrWorking = pendingChunks > 0 || activeChunks.length > 0 || reprocessWorking;
   const activePipelineStep = pipelineStepIndex(runtimeStatus, pendingChunks, pipelineStatus, finalizing, finalNotesWorking);
+  const normalizedRecordingConfig = clampRecordingConfig(recordingConfig);
+  const selectedAsrModelMeta = modelCatalogByKey.get(`asr:${normalizedRecordingConfig.asrModel}`);
+  const serviceReady = status.backend === "ready";
+  const serviceStarting = status.backend === "starting" || status.backend === "checking";
+  const serviceNeedsRefresh = ["starting", "checking", "offline", "unknown"].includes(status.backend);
+  const modelLoadBusy = modelLoadState?.status === "loading";
+  const modelRuntimeBusy = modelLoadBusy || Boolean(loadingAsrModelMeta);
+  const llmReady = status.vibe === "ready";
+  const llmUnavailableReason = llmReady ? "" : status.vibeDetail || "会议助手不可用，请在设置里配置纪要大模型。";
+  const selectedAsrModelLoaded = Boolean(selectedAsrModelMeta?.loaded)
+    || Boolean(
+      modelStatus?.loaded
+        && [modelStatus.model, modelStatus.runtime_model].filter(Boolean).includes(normalizedRecordingConfig.asrModel),
+    );
+  const asrReady = serviceReady && selectedAsrModelLoaded;
+  const preferredStartupAsrModel = firstInstalledAsrModel(modelCatalogAsr, normalizedRecordingConfig.asrModel);
   const liveRefreshActive = Boolean(
-    recording
+    serviceNeedsRefresh
+      || modelRuntimeBusy
+      || recording
       || pendingChunks > 0
       || activeChunks.length > 0
       || reprocessWorking
       || activeModelDownload,
   );
-  const normalizedRecordingConfig = clampRecordingConfig(recordingConfig);
-  const serviceReady = status.backend === "ready";
-  const serviceStarting = status.backend === "starting" || status.backend === "checking";
-  const modelLoadBusy = modelLoadState?.status === "loading";
-  const llmReady = status.vibe === "ready";
-  const llmUnavailableReason = llmReady ? "" : status.vibeDetail || "会议助手不可用，请在设置里配置纪要大模型。";
-  const asrReady = serviceReady && Boolean(loadedAsrModelMeta?.loaded || modelStatus?.loaded);
-  const preferredStartupAsrModel = firstInstalledAsrModel(modelCatalogAsr, normalizedRecordingConfig.asrModel);
   const asrUnavailableReason = !serviceReady
     ? "本地语音服务还在启动中，请稍候。"
-    : modelLoadBusy
+    : modelRuntimeBusy
       ? "识别模型正在加载，请稍候。"
       : selectableAsrModels.length === 0
         ? "本地还没有可用的识别模型，请先在设置里下载模型。"
         : asrReady
           ? ""
-          : "识别模型尚未加载，请先在设置里加载模型。";
+          : selectedAsrModelMeta?.installed
+            ? "当前录制模型尚未加载，请先在设置里加载模型。"
+            : "识别模型尚未加载，请先在设置里加载模型。";
   const servicePillClass = serviceStarting ? "working pulse-pill" : status.backend;
   const trimmedTitle = title.trim();
   const titleDirty = Boolean(meeting?.id && trimmedTitle && trimmedTitle !== meeting.title);
@@ -1102,31 +1124,34 @@ function App() {
       const [catalogResult] = await Promise.allSettled([api("/api/models")]);
       const catalog = catalogResult.status === "fulfilled" ? catalogResult.value : null;
       if (catalog) setModelCatalog(catalog);
-	      setStatus((current) => ({
-	        ...current,
-	        backend: "ready",
-	        backendDetail: "",
-	      }));
-	    } catch (err) {
-	      const nativeStatus = await nativeBackendStatus();
-	      const nativeError = String(nativeStatus?.error || "").trim();
-	      const recentLogs = Array.isArray(nativeStatus?.logs)
-	        ? nativeStatus.logs.filter(Boolean).slice(-3).join(" / ")
-	        : "";
-	      const backendDetail = nativeError || recentLogs || err.message;
-	      const backendState = nativeStatus?.status === "error"
-	        ? "offline"
-	        : serviceReadyOnceRef.current
-	          ? "offline"
-	          : "starting";
-	      setStatus((current) => ({
-	        ...current,
-	        backend: backendState,
-	        backendDetail,
-	      }));
-	      setModelStatus(null);
-	      setModelCatalog(null);
-	    }
+      setStatus((current) => ({
+        ...current,
+        backend: "ready",
+        backendDetail: "",
+      }));
+    } catch (err) {
+      const nativeStatus = await nativeBackendStatus();
+      const nativeError = String(nativeStatus?.error || "").trim();
+      const recentLogs = Array.isArray(nativeStatus?.logs)
+        ? nativeStatus.logs.filter(Boolean).slice(-3).join(" / ")
+        : "";
+      const backendDetail = nativeError || recentLogs || err.message;
+      const nativeReady = nativeStatus?.health_ok || nativeStatus?.status === "ready";
+      const backendState = nativeReady
+        ? "checking"
+        : nativeStatus?.status === "error"
+          ? "offline"
+          : serviceReadyOnceRef.current
+            ? "offline"
+            : "starting";
+      setStatus((current) => ({
+        ...current,
+        backend: backendState,
+        backendDetail,
+      }));
+      setModelStatus(null);
+      if (!serviceReadyOnceRef.current) setModelCatalog(null);
+    }
   }, []);
 
   const loadLlmStatus = useCallback(async () => {
@@ -1326,7 +1351,7 @@ function App() {
   useEffect(() => {
     if (!serviceReady || startupModelLoadAttemptedRef.current || modelLoadBusy) return;
     if (!modelCatalogAsr.length) return;
-    if (loadedAsrModelMeta?.loaded) {
+    if (selectedAsrModelLoaded) {
       startupModelLoadAttemptedRef.current = true;
       return;
     }
@@ -1339,10 +1364,10 @@ function App() {
     loadRecordingAsrModel(preferredStartupAsrModel, { source: "startup", autoClose: true });
   }, [
     loadRecordingAsrModel,
-    loadedAsrModelMeta?.loaded,
     modelCatalogAsr.length,
     modelLoadBusy,
     preferredStartupAsrModel,
+    selectedAsrModelLoaded,
     serviceReady,
   ]);
 
@@ -1895,7 +1920,7 @@ function App() {
       if (!id || !blob || blob.size === 0) return;
       const activeConfig = clampRecordingConfig(recordingConfigRef.current);
       setPendingChunks((value) => value + 1);
-      setPipelineStatus(modelStatus?.loaded ? "保存音频" : "准备语音识别");
+      setPipelineStatus(asrReady ? "保存音频" : "准备语音识别");
       setError("");
       const form = new FormData();
       const extension = blob.type.includes("wav")
@@ -1941,7 +1966,7 @@ function App() {
         setPendingChunks((value) => Math.max(0, value - 1));
       }
     },
-    [modelStatus?.loaded],
+    [asrReady],
   );
 
   const enqueueChunk = useCallback(
@@ -2682,12 +2707,11 @@ function App() {
       : "系统默认麦克风";
   const currentMicLabel = activeMicLabel || selectedMicLabel;
   const currentInputGainLabel = inputGainName(normalizedRecordingConfig.inputGain);
-  const activeAsrModelMeta = modelCatalogByKey.get(`asr:${normalizedRecordingConfig.asrModel}`);
   const recordingAsrModelValue = selectableAsrModels.includes(recordingConfig.asrModel)
     ? recordingConfig.asrModel
     : "";
   const currentRecordingSummary = [
-    activeAsrModelMeta?.label || asrModelName(normalizedRecordingConfig.asrModel),
+    selectedAsrModelMeta?.label || asrModelName(normalizedRecordingConfig.asrModel),
     languageName(normalizedRecordingConfig.language),
     speakerModeName(normalizedRecordingConfig.speakerMode),
   ].join(" · ");
