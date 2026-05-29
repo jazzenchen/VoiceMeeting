@@ -1,9 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { Pause, Play, SkipBack, SkipForward } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { formatOffset, transcriptParts } from "@/lib/meeting-display";
 import { useI18n } from "@/lib/i18n";
+
+const TimelineThreeCanvas = lazy(() => (
+  import("@/components/meeting/TimelineThreeCanvas").then((module) => ({
+    default: module.TimelineThreeCanvas,
+  }))
+));
 
 const GHOST_BARS = [
   0.38, 0.54, 0.42, 0.76, 0.48, 0.88, 0.58, 0.34, 0.68, 0.9, 0.5, 0.72,
@@ -11,7 +17,7 @@ const GHOST_BARS = [
 ];
 const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8788";
 const WAVEFORM_BAR_COUNT = 256;
-const SPEAKER_CLASS_COUNT = 6;
+const TIMELINE_EDGE_PAD_PX = 8;
 const JUMP_STEPS = [5000, 10000, 20000];
 const TOPIC_COMMON_TERMS = new Set([
   "一个",
@@ -389,7 +395,7 @@ export function MeetingTimeline({
   const [scrubMs, setScrubMs] = useState(null);
   const [hoverMs, setHoverMs] = useState(null);
   const waveformCacheRef = useRef(new Map());
-  const parts = flattenParts(transcriptItems, chunks);
+  const parts = useMemo(() => flattenParts(transcriptItems, chunks), [chunks, transcriptItems]);
   const lastPartEnd = Math.max(0, ...parts.map((part) => Number(part.end_ms) || Number(part.start_ms) || 0));
   const lastChunkEnd = Math.max(0, ...chunks.map(chunkEndMs));
   const liveMode = Boolean(recording);
@@ -399,11 +405,22 @@ export function MeetingTimeline({
   const playheadMs = liveMode ? durationMs : Number.isFinite(playbackPositionMs) ? playbackPositionMs : 0;
   const displayPlayheadMs = liveMode ? durationMs : scrubbing && Number.isFinite(scrubMs) ? scrubMs : playheadMs;
   const pct = (value) => Math.max(0, Math.min(100, (Number(value) || 0) * 100 / durationMs));
-  const speakerNames = orderedSpeakers(parts);
-  const speakerIndexByName = new Map(speakerNames.map((speaker, index) => [speaker, index]));
-  const topics = liveMode && !parts.length
-    ? [{ label: "等待第一段文字", start: 0, end: durationMs }]
-    : topicBands(parts, durationMs, meeting);
+  const speakerNames = useMemo(() => orderedSpeakers(parts), [parts]);
+  const speakerIndexByName = useMemo(
+    () => new Map(speakerNames.map((speaker, index) => [speaker, index])),
+    [speakerNames],
+  );
+  const topics = useMemo(() => (
+    liveMode && !parts.length
+      ? [{ label: "等待第一段文字", start: 0, end: durationMs }]
+      : topicBands(parts, durationMs, meeting)
+  ), [durationMs, liveMode, meeting, parts]);
+  const marks = useMemo(() => (
+    timelineMarks(parts).map((mark) => ({
+      ...mark,
+      ratio: durationMs > 0 ? (Number(mark.at) || 0) / durationMs : 0,
+    }))
+  ), [durationMs, parts]);
   const chunkSignature = useMemo(() => (
     chunks.map((chunk) => `${chunk.id}:${chunk.started_at_ms || 0}:${chunk.ended_at_ms || chunk.duration_ms || 0}`).join("|")
   ), [chunks]);
@@ -468,48 +485,50 @@ export function MeetingTimeline({
     return () => controller.abort();
   }, [chunkSignature, durationMs, liveMode, meeting?.id, waveformChunks]);
 
-  const bars = Array.from({ length: WAVEFORM_BAR_COUNT }, (_, index) => {
-    if (liveMode) {
-      const amplitude = Number(liveBars[index]);
-      const active = Number.isFinite(amplitude) && amplitude > 0;
+  const bars = useMemo(() => (
+    Array.from({ length: WAVEFORM_BAR_COUNT }, (_, index) => {
+      if (liveMode) {
+        const amplitude = Number(liveBars[index]);
+        const active = Number.isFinite(amplitude) && amplitude > 0;
+        return {
+          amplitude: active ? amplitude : 0.035,
+          active,
+          hasAudio: active,
+          speakerIndex: 0,
+        };
+      }
+      const centerMs = durationMs * (index + 0.5) / WAVEFORM_BAR_COUNT;
+      const part = parts.find((item) => {
+        const start = Number(item.start_ms) || 0;
+        const end = Number(item.end_ms) || start + 1200;
+        return centerMs >= start && centerMs <= end;
+      });
+      const audioBin = audioWaveform?.[index];
+      let amplitude = audioBin?.amplitude;
+      if (!Number.isFinite(amplitude)) {
+        const ghost = GHOST_BARS[index % GHOST_BARS.length];
+        const start = Number(part?.start_ms) || 0;
+        const end = Number(part?.end_ms) || start + 1200;
+        const progress = part ? Math.max(0, Math.min(1, (centerMs - start) / Math.max(1, end - start))) : 0;
+        const envelope = part ? Math.sin(progress * Math.PI) : 0;
+        const phraseHash = textHash(part?.text);
+        const localWave = Math.abs(Math.sin((progress * 7.5 + phraseHash * 0.001) * Math.PI));
+        const pulse = Math.abs(Math.sin(index * 1.91 + phraseHash * 0.013)) * 0.13;
+        const textWeight = part ? Math.min(0.16, cleanInline(part.text).length / 320) : 0;
+        amplitude = Math.max(
+          0.06,
+          Math.min(1, part ? 0.1 + envelope * (0.2 + localWave * 0.72) + pulse + textWeight : ghost * 0.18),
+        );
+      }
+      const speakerIndex = part?.speaker ? speakerIndexByName.get(part.speaker) ?? 0 : -1;
       return {
-        amplitude: active ? amplitude : 0.035,
-        active,
-        hasAudio: active,
-        speakerIndex: 0,
+        amplitude,
+        active: Boolean(part) && amplitude > 0.025,
+        hasAudio: Boolean(audioBin?.hasAudio),
+        speakerIndex,
       };
-    }
-    const centerMs = durationMs * (index + 0.5) / WAVEFORM_BAR_COUNT;
-    const part = parts.find((item) => {
-      const start = Number(item.start_ms) || 0;
-      const end = Number(item.end_ms) || start + 1200;
-      return centerMs >= start && centerMs <= end;
-    });
-    const audioBin = audioWaveform?.[index];
-    let amplitude = audioBin?.amplitude;
-    if (!Number.isFinite(amplitude)) {
-      const ghost = GHOST_BARS[index % GHOST_BARS.length];
-      const start = Number(part?.start_ms) || 0;
-      const end = Number(part?.end_ms) || start + 1200;
-      const progress = part ? Math.max(0, Math.min(1, (centerMs - start) / Math.max(1, end - start))) : 0;
-      const envelope = part ? Math.sin(progress * Math.PI) : 0;
-      const phraseHash = textHash(part?.text);
-      const localWave = Math.abs(Math.sin((progress * 7.5 + phraseHash * 0.001) * Math.PI));
-      const pulse = Math.abs(Math.sin(index * 1.91 + phraseHash * 0.013)) * 0.13;
-      const textWeight = part ? Math.min(0.16, cleanInline(part.text).length / 320) : 0;
-      amplitude = Math.max(
-        0.06,
-        Math.min(1, part ? 0.1 + envelope * (0.2 + localWave * 0.72) + pulse + textWeight : ghost * 0.18),
-      );
-    }
-    const speakerIndex = part?.speaker ? speakerIndexByName.get(part.speaker) ?? 0 : -1;
-    return {
-      amplitude,
-      active: Boolean(part) && amplitude > 0.025,
-      hasAudio: Boolean(audioBin?.hasAudio),
-      speakerIndex,
-    };
-  });
+    })
+  ), [audioWaveform, durationMs, liveBars, liveMode, parts, speakerIndexByName]);
 
   const jumpBy = (direction) => {
     onJump(Math.max(0, Math.min(durationMs, playheadMs + direction * jumpStepMs)));
@@ -648,29 +667,27 @@ export function MeetingTimeline({
         </div>
         <div
           className={`tl-track ${waveformLoading && !liveMode ? "loading-waveform" : ""} ${liveMode ? "live-recording" : ""}`}
-          style={{ "--wave-progress": `${Math.round(waveformProgress * 100)}%` }}
+          style={{
+            "--wave-progress": `${Math.round(waveformProgress * 100)}%`,
+            "--tl-edge-pad": `${TIMELINE_EDGE_PAD_PX}px`,
+          }}
         >
-          <div className="tl-track-bars">
-            {bars.map((bar, index) => (
-              <span
-                className={`tl-wave-bar ${bar.active ? `active spk-${bar.speakerIndex % SPEAKER_CLASS_COUNT}` : "ghost"} ${bar.hasAudio ? "from-audio" : "synthetic"}`}
-                key={`wave-${index}`}
-                style={{
-                  "--amp": bar.amplitude,
-                }}
-              />
-            ))}
-          </div>
-          {Number.isFinite(hoverMs) && (
-            <div className="tl-hoverline" style={{ "--hoverline": `${pct(hoverMs)}%` }} />
-          )}
+          <Suspense fallback={<div className="tl-three-host" aria-hidden="true" />}>
+            <TimelineThreeCanvas
+              bars={bars}
+              marks={marks}
+              playheadRatio={pct(displayPlayheadMs) / 100}
+              hoverRatio={Number.isFinite(hoverMs) ? pct(hoverMs) / 100 : null}
+              loadingProgress={waveformLoading && !liveMode ? waveformProgress : 0}
+              edgePadPx={TIMELINE_EDGE_PAD_PX}
+            />
+          </Suspense>
           {waveformLoading && !liveMode && (
             <div className="tl-wave-loading" role="status" aria-live="polite">
               <span className="tl-load-dot" aria-hidden="true" />
               <span>{t("加载音频波形 {progress}%", { progress: Math.round(waveformProgress * 100) })}</span>
             </div>
           )}
-          <div className="tl-playhead" style={{ "--playhead": `${pct(displayPlayheadMs)}%` }} />
         </div>
         <div className="tl-ruler">
           {[0, 0.25, 0.5, 0.75, 1].map((point) => (
