@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import gc
+import os
 import re
 import subprocess
-import gc
+import wave
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -13,6 +15,7 @@ from .config import (
     ASR_LANGUAGE,
     ASR_MODEL,
     ASR_MODEL_DIR,
+    FUNASR_MODEL_DIR,
     MLX_ASR_MODEL_DIR,
 )
 from .media_tools import ffmpeg_path
@@ -579,3 +582,211 @@ class MlxWhisperASR(FasterWhisperASR):
             "segments": segments,
             "text": "\n".join(segment["text"] for segment in segments),
         }
+
+
+class FunASRASR(FasterWhisperASR):
+    def __init__(
+        self,
+        model_name: str,
+        model_id: str,
+        model_dir: Path = FUNASR_MODEL_DIR,
+        language: Optional[str] = ASR_LANGUAGE,
+        display_name: Optional[str] = None,
+        vad_model: str = "fsmn-vad",
+        punc_model: str = "ct-punc-c",
+        trust_remote_code: bool = False,
+    ) -> None:
+        super().__init__(
+            model_name=display_name or model_name,
+            model_dir=model_dir,
+            device=os.environ.get("VOICE_MEETING_FUNASR_DEVICE", "cpu"),
+            compute_type="torch",
+            language=language,
+        )
+        self.model_id = model_id
+        self.vad_model = vad_model
+        self.punc_model = punc_model
+        self.trust_remote_code = trust_remote_code
+
+    def status(self) -> Dict[str, Any]:
+        return {
+            "backend": "funasr",
+            "model": self.model_name,
+            "model_id": self.model_id,
+            "device": self.device,
+            "compute_type": self.compute_type,
+            "loaded": self.loaded,
+            "loading": self.loading,
+            "language": self.language or "auto",
+            "last_error": self.last_error,
+        }
+
+    def _configure_cache(self) -> None:
+        self.model_dir.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("MODELSCOPE_CACHE", str(self.model_dir / "modelscope"))
+        os.environ.setdefault("HF_HOME", str(self.model_dir / "huggingface"))
+
+    def _load_model(self) -> Any:
+        if self._model is not None:
+            return self._model
+        self.loading = True
+        self.last_error = ""
+        try:
+            from funasr import AutoModel
+        except Exception as exc:
+            self.loading = False
+            self.last_error = str(exc)
+            raise ASRUnavailable(
+                "funasr is not installed. Run scripts/setup.sh first."
+            ) from exc
+
+        try:
+            self._configure_cache()
+            kwargs: Dict[str, Any] = {
+                "model": self.model_id,
+                "device": self.device,
+                "disable_update": True,
+            }
+            if self.vad_model:
+                kwargs["vad_model"] = self.vad_model
+                kwargs["vad_kwargs"] = {"max_single_segment_time": 30000}
+            if self.punc_model:
+                kwargs["punc_model"] = self.punc_model
+            if self.trust_remote_code:
+                kwargs["trust_remote_code"] = True
+            self._model = AutoModel(**kwargs)
+            self.loaded = True
+            return self._model
+        except Exception as exc:
+            self.last_error = str(exc)
+            raise
+        finally:
+            self.loading = False
+
+    def unload(self) -> None:
+        super().unload()
+        try:
+            import torch
+
+            if getattr(torch, "cuda", None) and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+    def transcribe(
+        self,
+        wav_path: Path,
+        language: Optional[str] = None,
+        context_prompt: str = "",
+    ) -> Dict[str, Any]:
+        model = self.require_loaded()
+        vad_segments = self.detect_speech(wav_path)
+        if not vad_segments:
+            return self.empty_result(language, language or self.language, True)
+
+        kwargs: Dict[str, Any] = {
+            "input": str(wav_path),
+            "batch_size_s": 300,
+            "merge_vad": True,
+        }
+        hotword = self.clean_context_prompt(context_prompt)
+        if hotword:
+            kwargs["hotword"] = hotword
+
+        result = model.generate(**kwargs)
+        segments = self._segments_from_result(result, wav_path)
+        return {
+            "requested_language": language or self.language or "auto",
+            "backend": "funasr",
+            "model": self.model_name,
+            "language": self._language_from_request(language),
+            "language_probability": None,
+            "top_languages": [],
+            "multilingual": True,
+            "vad_segments": vad_segments,
+            "segments": segments,
+            "text": "\n".join(segment["text"] for segment in segments),
+        }
+
+    def _language_from_request(self, language: Optional[str]) -> Optional[str]:
+        requested = language or self.language
+        if requested in {None, "auto", "multilingual", "mixed", "zh-en", "bilingual"}:
+            return None
+        return requested
+
+    def _segments_from_result(self, result: Any, wav_path: Path) -> List[Dict[str, Any]]:
+        records = result if isinstance(result, list) else [result]
+        segments: List[Dict[str, Any]] = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            sentence_info = record.get("sentence_info") or record.get("sentences") or []
+            for sentence in sentence_info:
+                if not isinstance(sentence, dict):
+                    continue
+                text = self.clean_funasr_text(sentence.get("text") or sentence.get("raw_text") or "")
+                if not text:
+                    continue
+                start_ms, end_ms = self._sentence_range(sentence)
+                segments.append(
+                    {
+                        "start_ms": start_ms,
+                        "end_ms": end_ms,
+                        "text": text,
+                        "confidence": None,
+                    }
+                )
+            if segments:
+                continue
+            text = self.clean_funasr_text(record.get("text") or "")
+            if text:
+                duration_ms = self._wav_duration_ms(wav_path)
+                segments.append(
+                    {
+                        "start_ms": 0,
+                        "end_ms": max(duration_ms, 1000),
+                        "text": text,
+                        "confidence": None,
+                    }
+                )
+        return segments
+
+    def _sentence_range(self, sentence: Dict[str, Any]) -> tuple[int, int]:
+        start = sentence.get("start") or sentence.get("start_ms")
+        end = sentence.get("end") or sentence.get("end_ms")
+        timestamp = sentence.get("timestamp")
+        if (start is None or end is None) and isinstance(timestamp, list) and timestamp:
+            first = timestamp[0]
+            last = timestamp[-1]
+            if isinstance(first, (list, tuple)) and len(first) >= 2:
+                start = first[0]
+            if isinstance(last, (list, tuple)) and len(last) >= 2:
+                end = last[1]
+        start_ms = self._normalize_time_ms(start)
+        end_ms = self._normalize_time_ms(end)
+        if end_ms <= start_ms:
+            end_ms = start_ms + 1000
+        return start_ms, end_ms
+
+    def _normalize_time_ms(self, value: Any) -> int:
+        try:
+            numeric = float(value)
+        except Exception:
+            return 0
+        if numeric < 100:
+            numeric *= 1000
+        return max(0, int(round(numeric)))
+
+    def _wav_duration_ms(self, wav_path: Path) -> int:
+        try:
+            with wave.open(str(wav_path), "rb") as handle:
+                frames = handle.getnframes()
+                rate = handle.getframerate() or SAMPLE_RATE
+            return int(frames * 1000 / rate)
+        except Exception:
+            return 0
+
+    def clean_funasr_text(self, text: Any) -> str:
+        value = re.sub(r"<\|[^>]+?\|>", "", str(text or ""))
+        value = re.sub(r"\s+", " ", value).strip()
+        return self.to_simplified(value)
