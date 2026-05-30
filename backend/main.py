@@ -1550,6 +1550,26 @@ async def activate_meeting_version(
         raise HTTPException(status_code=404, detail="找不到这份稿件，请刷新后再试。")
 
 
+@app.delete("/api/meetings/{meeting_id}/versions/{version_id}")
+async def delete_meeting_version(
+    meeting_id: str,
+    version_id: str,
+    background_tasks: BackgroundTasks,
+) -> Dict[str, Any]:
+    try:
+        meeting_before = store.get_meeting(meeting_id)
+        meeting = store.delete_transcript_version(meeting_id, version_id)
+        if (meeting_before.get("active_version_id") or "auto") == version_id:
+            queue_summary_rebuild(meeting_id, background_tasks, "稿件已删除")
+        return meeting
+    except KeyError:
+        raise HTTPException(status_code=404, detail="找不到这份稿件，请刷新后再试。")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
 @app.post("/api/meetings/{meeting_id}/versions/editable")
 async def create_editable_meeting_version(
     meeting_id: str,

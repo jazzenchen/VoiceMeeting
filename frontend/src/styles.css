@@ -907,6 +907,23 @@ a {
   outline: none;
 }
 
+.version-delete-button {
+  width: 24px;
+  height: 24px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid #d3dde5;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #8a97a2;
+  cursor: pointer;
+}
+
+.version-delete-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .pane-actions {
   display: flex;
   align-items: center;
@@ -2190,6 +2207,17 @@ a {
   color: var(--fg-2);
   border-color: var(--vm-border);
   background: var(--surface-2);
+}
+
+.app-shell .version-delete-button {
+  color: var(--fg-3);
+  border-color: var(--vm-border);
+  background: var(--surface-2);
+}
+
+.app-shell .version-delete-button:hover {
+  color: var(--risk);
+  border-color: color-mix(in srgb, var(--risk) 42%, var(--vm-border));
 }
 
 .app-shell .transcript-version-select:focus {

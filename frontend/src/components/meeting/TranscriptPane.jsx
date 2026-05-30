@@ -10,6 +10,7 @@ import {
   Scissors,
   SlidersHorizontal,
   Sparkles,
+  Trash2,
   Users,
   Wrench,
   X,
@@ -55,6 +56,7 @@ export function TranscriptPane({
   transcriptVersions = [],
   activeVersionId,
   activateTranscriptVersion,
+  deleteTranscriptVersion,
   lastAsr,
   asrLanguage,
   downloadTranscript,
@@ -93,6 +95,13 @@ export function TranscriptPane({
     return activeTranscriptVersion ? [activeTranscriptVersion] : [];
   }, [activeTranscriptVersion, transcriptVersions]);
   const selectedVersionId = activeVersionId || meeting?.active_version_id || activeTranscriptVersion?.id || "auto";
+  const selectedVersion = versions.find((version) => version.id === selectedVersionId) || activeTranscriptVersion;
+  const canDeleteSelectedVersion = Boolean(
+    selectedVersion
+      && selectedVersion.id
+      && selectedVersion.id !== "auto"
+      && !["queued", "running"].includes(selectedVersion.status),
+  );
   const recognizedItems = useMemo(() => recognizedTranscriptItems(transcriptItems), [transcriptItems]);
   const hasRecognizedTranscript = recognizedItems.length > 0;
   const transcriptDescription = useMemo(() => {
@@ -221,6 +230,18 @@ export function TranscriptPane({
                   </option>
                 ))}
               </select>
+            )}
+            {canDeleteSelectedVersion && (
+              <button
+                type="button"
+                className="version-delete-button"
+                onClick={() => deleteTranscriptVersion?.(selectedVersion.id)}
+                disabled={!meeting || reprocessWorking || editBusy}
+                title={t("删除当前稿件")}
+                aria-label={t("删除当前稿件")}
+              >
+                <Trash2 size={13} />
+              </button>
             )}
             <span>{transcriptDescription}</span>
           </div>

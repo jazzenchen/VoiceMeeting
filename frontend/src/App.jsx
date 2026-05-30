@@ -1626,6 +1626,29 @@ function App() {
     [meeting?.active_version_id, meeting?.id],
   );
 
+  const deleteTranscriptVersion = useCallback(
+    async (versionId) => {
+      const id = meeting?.id;
+      if (!id || !versionId || versionId === "auto") return;
+      const version = (meeting?.transcript_versions || []).find((item) => item.id === versionId);
+      if (["queued", "running"].includes(version?.status)) return;
+      const label = transcriptVersionOption(version || { id: versionId });
+      if (!window.confirm(`删除稿件：${label}？`)) return;
+      setError("");
+      try {
+        const updated = await api(`/api/meetings/${id}/versions/${encodeURIComponent(versionId)}`, {
+          method: "DELETE",
+        });
+        setMeeting(updated);
+        setPipelineStatus("稿件已删除");
+        await refreshMeetings();
+      } catch (err) {
+        setError(userFriendlyError(err.message));
+      }
+    },
+    [meeting?.id, meeting?.transcript_versions, refreshMeetings],
+  );
+
   const startReprocess = useCallback(
     async (level) => {
       const id = meeting?.id;
@@ -2859,6 +2882,7 @@ function App() {
             transcriptVersions={meeting?.transcript_versions || []}
             activeVersionId={meeting?.active_version_id || "auto"}
             activateTranscriptVersion={activateTranscriptVersion}
+            deleteTranscriptVersion={deleteTranscriptVersion}
             lastAsr={lastAsr}
             asrLanguage={asrLanguage}
             downloadTranscript={downloadTranscript}
