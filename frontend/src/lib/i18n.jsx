@@ -61,6 +61,7 @@ const EN = {
   "编辑会议标题和本场引导词": "Edit title and context guide",
   "选择稿件版本": "Choose transcript version",
   "语音转文字处理中": "Transcribing audio",
+  "文字识别": "ASR",
   "处理中": "Processing",
   "从这里开始回放": "Play from here",
   "从这里播放": "Play from here",

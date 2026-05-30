@@ -2840,6 +2840,7 @@ function App() {
           chunkCount={chunks.length}
           status={status}
           llmStatus={llmStatus}
+          modelStatus={modelStatus}
           servicePillClass={servicePillClass}
           asrWorking={asrWorking}
           runtimeStatus={displayRuntimeStatus}
