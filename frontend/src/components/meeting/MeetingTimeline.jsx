@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, AudioWaveform, BarChart3, Pause, Play, SkipBack, SkipForward } from "lucide-react";
+import { AudioWaveform, ChartArea, ChartLine, Pause, Play, SkipBack, SkipForward } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { formatOffset, transcriptParts } from "@/lib/meeting-display";
@@ -21,9 +21,9 @@ const TIMELINE_EDGE_PAD_PX = 8;
 const JUMP_STEPS = [5000, 10000, 20000];
 const TIMELINE_VIEW_STORAGE_KEY = "voice-meeting-timeline-view";
 const TIMELINE_VISUAL_MODES = [
-  { id: "waveform", label: "波形", title: "波形视图", Icon: AudioWaveform },
-  { id: "energy", label: "能量", title: "能量视图", Icon: Activity },
-  { id: "density", label: "密度", title: "密度视图", Icon: BarChart3 },
+  { id: "waveform", label: "波形", title: "柱状波形视图", Icon: AudioWaveform },
+  { id: "line", label: "折线", title: "折线视图", Icon: ChartLine },
+  { id: "area", label: "包络", title: "包络视图", Icon: ChartArea },
 ];
 const TOPIC_COMMON_TERMS = new Set([
   "一个",
@@ -310,28 +310,14 @@ function weightedLocalAverage(values, index, radius) {
 function timelineBarsForMode(bars, mode) {
   if (mode === "waveform") return bars;
   const amplitudes = bars.map((bar) => clamp01(bar?.amplitude));
-  if (mode === "energy") {
-    return bars.map((bar, index) => {
-      const energy = weightedLocalAverage(amplitudes, index, 2);
-      return {
-        ...bar,
-        amplitude: Math.min(0.86, Math.max(bar?.active ? 0.035 : 0.018, Math.pow(energy, 0.78) * 0.74 + 0.028)),
-      };
-    });
-  }
-  if (mode === "density") {
-    const activeFlags = bars.map((bar) => (bar?.active || bar?.hasAudio ? 1 : 0));
-    return bars.map((bar, index) => {
-      const density = weightedLocalAverage(activeFlags, index, 4);
-      const energy = weightedLocalAverage(amplitudes, index, 4);
-      return {
-        ...bar,
-        active: Boolean(bar?.active) || density > 0.18,
-        amplitude: Math.min(0.74, Math.max(0.024, density * 0.42 + Math.pow(energy, 0.82) * 0.28 + 0.032)),
-      };
-    });
-  }
-  return bars;
+  const radius = mode === "area" ? 3 : 2;
+  return bars.map((bar, index) => {
+    const smooth = weightedLocalAverage(amplitudes, index, radius);
+    return {
+      ...bar,
+      amplitude: Math.min(0.88, Math.max(bar?.active ? 0.035 : 0.018, Math.pow(smooth, 0.82) * 0.78 + 0.02)),
+    };
+  });
 }
 
 function shapeAudioAmplitude(value, floor, ceiling) {
@@ -757,6 +743,7 @@ export function MeetingTimeline({
             <TimelineThreeCanvas
               bars={visibleBars}
               marks={marks}
+              visualMode={timelineViewMode}
               playheadRatio={pct(displayPlayheadMs) / 100}
               hoverRatio={Number.isFinite(hoverMs) ? pct(hoverMs) / 100 : null}
               loadingProgress={waveformLoading && !liveMode ? waveformProgress : 0}
