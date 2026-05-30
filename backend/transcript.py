@@ -10,6 +10,7 @@ MAX_FRAGMENT_GAP_MS = 2600
 MAX_UTTERANCE_DURATION_MS = 28000
 MAX_UTTERANCE_TEXT_CHARS = 420
 MIN_LONG_UTTERANCE_CHARS = 180
+UNRECOGNIZED_TEXT = "（未识别到）"
 
 
 def _to_int(value: Any, default: int = 0) -> int:
@@ -24,6 +25,10 @@ def _to_int(value: Any, default: int = 0) -> int:
 def _speaker(value: Any) -> str:
     text = str(value or "").strip()
     return text or "Speaker"
+
+
+def is_unrecognized_text(value: Any) -> bool:
+    return str(value or "").strip() == UNRECOGNIZED_TEXT
 
 
 def _is_word_char(value: str) -> bool:
@@ -81,12 +86,13 @@ def _join_text(left: str, right: str) -> str:
 
 
 def _part_from_segment(segment: Dict[str, Any], text: str) -> Dict[str, Any]:
+    unrecognized = is_unrecognized_text(segment.get("text")) or is_unrecognized_text(text)
     return {
         "id": segment.get("id"),
         "chunk_id": segment.get("chunk_id"),
         "chunk_seq": _to_int(segment.get("chunk_seq"), 0),
-        "speaker": _speaker(segment.get("speaker")),
-        "text": text,
+        "speaker": "" if unrecognized else _speaker(segment.get("speaker")),
+        "text": UNRECOGNIZED_TEXT if unrecognized else text,
         "raw_text": str(segment.get("text") or "").strip(),
         "start_ms": _to_int(segment.get("absolute_start_ms")),
         "end_ms": _to_int(segment.get("absolute_end_ms")),
@@ -103,7 +109,7 @@ def _absolute_segment(segment: Dict[str, Any], chunk_map: Dict[str, Dict[str, An
         end_ms = start_ms
     return {
         **segment,
-        "speaker": _speaker(segment.get("speaker")),
+        "speaker": "" if is_unrecognized_text(segment.get("text")) else _speaker(segment.get("speaker")),
         "absolute_start_ms": start_ms,
         "absolute_end_ms": end_ms,
         "chunk_seq": _to_int(chunk.get("seq"), 0),
@@ -111,6 +117,16 @@ def _absolute_segment(segment: Dict[str, Any], chunk_map: Dict[str, Dict[str, An
 
 
 def _should_merge(current: Dict[str, Any], segment: Dict[str, Any]) -> bool:
+    current_unrecognized = is_unrecognized_text(current.get("text"))
+    segment_unrecognized = is_unrecognized_text(segment.get("text"))
+    if current_unrecognized or segment_unrecognized:
+        if current_unrecognized != segment_unrecognized:
+            return False
+        gap_ms: Optional[int] = None
+        if current.get("end_ms") is not None and segment.get("absolute_start_ms") is not None:
+            gap_ms = _to_int(segment.get("absolute_start_ms")) - _to_int(current.get("end_ms"))
+        return gap_ms is None or gap_ms <= MAX_FRAGMENT_GAP_MS
+
     if _speaker(current.get("speaker")) != _speaker(segment.get("speaker")):
         return False
 
@@ -156,7 +172,10 @@ def build_utterances(
             continue
 
         if current is not None and _should_merge(current, segment):
-            joined_text, part_text = _join_text_with_piece(str(current.get("text") or ""), text)
+            if is_unrecognized_text(current.get("text")):
+                joined_text, part_text = UNRECOGNIZED_TEXT, UNRECOGNIZED_TEXT
+            else:
+                joined_text, part_text = _join_text_with_piece(str(current.get("text") or ""), text)
             current["text"] = joined_text
             current["end_ms"] = max(_to_int(current.get("end_ms")), _to_int(segment.get("absolute_end_ms")))
             current["segment_count"] = _to_int(current.get("segment_count"), 1) + 1
@@ -170,10 +189,11 @@ def build_utterances(
         if current is not None:
             utterances.append(current)
 
+        unrecognized = is_unrecognized_text(text)
         current = {
             "id": f"utt-{segment.get('id')}",
-            "speaker": _speaker(segment.get("speaker")),
-            "text": text,
+            "speaker": "" if unrecognized else _speaker(segment.get("speaker")),
+            "text": UNRECOGNIZED_TEXT if unrecognized else text,
             "start_ms": _to_int(segment.get("absolute_start_ms")),
             "end_ms": _to_int(segment.get("absolute_end_ms")),
             "created_at": segment.get("created_at"),

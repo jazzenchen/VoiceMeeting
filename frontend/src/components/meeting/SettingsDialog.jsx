@@ -35,7 +35,6 @@ export function SettingsDialog({
   micDevices,
   recordingAsrModelValue,
   updateRecordingConfig,
-  loadRecordingAsrModel,
   modelLoading,
   selectableAsrModels,
   asrModelGroups,
@@ -56,7 +55,6 @@ export function SettingsDialog({
   resetPromptDraft,
   savePromptConfig,
   refreshPromptConfig,
-  refreshStatus,
   modelCatalogAsrGroups,
   modelCatalog,
   downloadModel,
@@ -163,7 +161,6 @@ export function SettingsDialog({
                 micDevices={micDevices}
                 recordingAsrModelValue={recordingAsrModelValue}
                 updateRecordingConfig={updateRecordingConfig}
-                loadRecordingAsrModel={loadRecordingAsrModel}
                 modelLoading={modelLoading}
                 selectableAsrModels={selectableAsrModels}
                 asrModelGroups={asrModelGroups}
@@ -194,7 +191,6 @@ export function SettingsDialog({
               />
             ) : (
               <ModelFilesPanel
-                refreshStatus={refreshStatus}
                 modelCatalogAsrGroups={modelCatalogAsrGroups}
                 modelCatalog={modelCatalog}
                 downloadModel={downloadModel}
@@ -287,7 +283,6 @@ function RecordingSettingsPanel({
   micDevices,
   recordingAsrModelValue,
   updateRecordingConfig,
-  loadRecordingAsrModel,
   modelLoading,
   selectableAsrModels,
   asrModelGroups,
@@ -331,7 +326,7 @@ function RecordingSettingsPanel({
           <select
             className="select-input compact-select"
             value={recordingAsrModelValue}
-            onChange={(event) => loadRecordingAsrModel(event.target.value)}
+            onChange={(event) => updateRecordingConfig("asrModel", event.target.value)}
             disabled={recording || modelLoading || selectableAsrModels.length === 0}
           >
             {selectableAsrModels.length === 0 && (
@@ -608,7 +603,6 @@ function PromptSettingsPanel({
 }
 
 function ModelFilesPanel({
-  refreshStatus,
   modelCatalogAsrGroups,
   modelCatalog,
   downloadModel,
@@ -622,10 +616,6 @@ function ModelFilesPanel({
           <h3>{t("模型文件")}</h3>
           <p>{t("管理语音识别和说话人分离所需的本地模型。")}</p>
         </div>
-        <button className="mini-button text-mini" onClick={refreshStatus} title={t("刷新模型状态")}>
-          <RefreshCcw size={13} />
-          <span>{t("刷新")}</span>
-        </button>
       </div>
 
       <div className="model-list settings-model-list">

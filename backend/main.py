@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -38,6 +38,7 @@ from .diarization import DiarizationUnavailable, PyannoteDiarizer, assign_speake
 from .llm import LLMManager
 from .media_tools import ffprobe_path
 from .prompt_settings import PromptConfigStore
+from .recording_config import RecordingConfigStore
 from .speaker_tracker import SpeakerTracker, SpeakerTrackingUnavailable
 from .storage import MeetingStore
 from .summarizer import (
@@ -49,7 +50,7 @@ from .summarizer import (
     fallback_incremental_summary,
     notes_only_markdown,
 )
-from .transcript import build_utterances
+from .transcript import UNRECOGNIZED_TEXT, build_utterances, is_unrecognized_text
 from .vibearound import VibeAroundClient
 
 
@@ -65,6 +66,7 @@ app.add_middleware(
 )
 
 store = MeetingStore()
+store.mark_interrupted_chunks(error="服务重启时识别被中断，请重新识别这段音频。")
 asr = FasterWhisperASR()
 asr_engines: Dict[str, FasterWhisperASR] = {}
 diarizer = PyannoteDiarizer()
@@ -73,6 +75,7 @@ speaker_tracker = SpeakerTracker()
 vibearound = VibeAroundClient()
 llm = LLMManager(vibearound)
 prompt_settings = PromptConfigStore(DEFAULT_PROMPTS, DEFAULT_PROMPT_META)
+recording_config = RecordingConfigStore()
 summarizer = MeetingSummarizer(llm, prompt_getter=prompt_settings.get)
 summary_lock = asyncio.Lock()
 summary_states: Dict[str, Dict[str, Any]] = {}
@@ -80,6 +83,10 @@ reprocess_states: Dict[str, Dict[str, Any]] = {}
 REALTIME_SUMMARY_ENABLED = False
 model_download_states: Dict[str, Dict[str, Any]] = {}
 model_load_lock = threading.Lock()
+recording_model_load_error = ""
+llm_status_cache: Dict[str, Any] = {"updated_at": 0.0, "value": {}}
+llm_status_lock = asyncio.Lock()
+LLM_STATUS_TTL_SECONDS = 10.0
 SUMMARY_TASK_TIMEOUT_SECONDS = 300.0
 SUMMARY_STALE_SECONDS = 300.0
 
@@ -363,10 +370,15 @@ def local_asr_models() -> list[str]:
     return sorted(discovered_asr_models())
 
 
-def resolve_asr_model(value: Optional[str]) -> str:
+def normalize_asr_model(value: Optional[str]) -> str:
     model_name = (value or ASR_MODEL).strip()
     if model_name not in SUPPORTED_ASR_MODELS:
         raise HTTPException(status_code=400, detail="当前识别方式不可用，请换一个选项。")
+    return model_name
+
+
+def resolve_asr_model(value: Optional[str]) -> str:
+    model_name = normalize_asr_model(value)
     if model_name not in discovered_asr_models():
         raise HTTPException(status_code=400, detail="本地还没有这套识别资源，请选择已有的识别方式。")
     return model_name
@@ -488,6 +500,28 @@ def model_catalog() -> Dict[str, Any]:
             reverse=True,
         )[:24],
     }
+
+
+def asr_model_options() -> list[Dict[str, Any]]:
+    options: list[Dict[str, Any]] = []
+    catalog_groups: list[tuple[str, str, Dict[str, Dict[str, Any]]]] = [
+        ("faster-whisper", "通用", ASR_MODEL_CATALOG),
+        ("funasr", "FunASR", FUNASR_MODEL_CATALOG),
+    ]
+    if MAC_MLX_ENABLED:
+        catalog_groups.append(("mlx", "Apple MLX", MLX_ASR_MODEL_CATALOG))
+    for backend, backend_label, catalog in catalog_groups:
+        for name, meta in catalog.items():
+            options.append(
+                {
+                    "name": name,
+                    "label": meta["label"],
+                    "backend": backend,
+                    "backend_label": backend_label,
+                    "base_model": meta.get("base_model") or name,
+                }
+            )
+    return options
 
 
 def _friendly_model_error(exc: Exception, kind: str = "") -> str:
@@ -912,6 +946,47 @@ def clear_segment_speakers(segments: list[Dict[str, Any]]) -> list[Dict[str, Any
     return [{**segment, "speaker": ""} for segment in segments]
 
 
+def coerce_ms(value: Any, *, minimum: int = 0) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        parsed = int(round(float(str(value).strip())))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= minimum else None
+
+
+def chunk_duration_for_placeholder(chunk: Dict[str, Any]) -> int:
+    duration = coerce_ms(chunk.get("duration_ms"), minimum=1)
+    if duration is not None:
+        return duration
+    started = coerce_ms(chunk.get("started_at_ms"))
+    ended = coerce_ms(chunk.get("ended_at_ms"))
+    if started is not None and ended is not None and ended > started:
+        return ended - started
+    path = existing_audio_path(chunk.get("wav_path"), chunk.get("audio_path"))
+    if path is not None:
+        probed = audio_duration_ms(path)
+        if probed and probed > 0:
+            return probed
+    return 1000
+
+
+def unrecognized_segment_for_chunk(chunk: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "start_ms": 0,
+        "end_ms": chunk_duration_for_placeholder(chunk),
+        "speaker": "",
+        "text": UNRECOGNIZED_TEXT,
+        "confidence": None,
+    }
+
+
+def segments_or_unrecognized(chunk: Dict[str, Any], segments: Optional[list[Dict[str, Any]]]) -> list[Dict[str, Any]]:
+    recognized = [segment for segment in (segments or []) if str(segment.get("text") or "").strip()]
+    return recognized if recognized else [unrecognized_segment_for_chunk(chunk)]
+
+
 def asr_context_prompt(
     meeting: Dict[str, Any],
     recent_context: str = "",
@@ -957,6 +1032,7 @@ def transcript_source(meeting: Dict[str, Any], segments: Optional[list[Dict[str,
         }
         for segment in segment_rows
         if str(segment.get("text") or "").strip()
+        and not is_unrecognized_text(segment.get("text"))
     ]
     digest = hashlib.sha1(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -1228,6 +1304,14 @@ class ModelDownloadRequest(BaseModel):
     model: str
 
 
+class RecordingConfigRequest(BaseModel):
+    language: Optional[str] = None
+    asr_model: Optional[str] = None
+    speaker_mode: Optional[str] = None
+    max_segment_ms: Optional[int] = None
+    input_gain: Optional[float] = None
+
+
 class LLMOpenAIChatRequest(BaseModel):
     base_url: Optional[str] = None
     api_key: Optional[str] = None
@@ -1247,9 +1331,29 @@ class ModelDownloadCancelled(RuntimeError):
     pass
 
 
+async def send_changed_json(websocket: WebSocket, payload: Dict[str, Any], previous: str) -> str:
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if encoded != previous:
+        await websocket.send_json(payload)
+    return encoded
+
+
 @app.get("/api/models")
 async def list_models() -> Dict[str, Any]:
     return model_catalog()
+
+
+@app.websocket("/api/models/ws")
+async def models_websocket(websocket: WebSocket) -> None:
+    await websocket.accept()
+    previous = ""
+    try:
+        while True:
+            payload = await asyncio.to_thread(model_catalog)
+            previous = await send_changed_json(websocket, payload, previous)
+            await asyncio.sleep(1.5)
+    except WebSocketDisconnect:
+        return
 
 
 @app.post("/api/models/download")
@@ -1557,10 +1661,11 @@ async def start_reprocess_job(
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
 
     if level in {"asr", "rerun-asr", "full-asr"}:
-        requested_language = (payload.language or "auto").strip().lower()
+        active_recording_config = recording_config.read()
+        requested_language = str(active_recording_config.get("language") or payload.language or "auto").strip().lower()
         if requested_language not in SUPPORTED_ASR_LANGUAGES:
             raise HTTPException(status_code=400, detail="当前语言暂不支持，请换一种语言设置。")
-        requested_model = resolve_asr_model(payload.asr_model)
+        requested_model = normalize_asr_model(active_recording_config.get("asr_model"))
         try:
             require_loaded_asr_engine(requested_model)
         except ASRUnavailable as exc:
@@ -1605,6 +1710,7 @@ async def start_reprocess_job(
             meeting_id,
             job_id,
             version_id,
+            source_version_id,
             requested_language,
             requested_model,
             requested_speaker_mode,
@@ -1747,7 +1853,7 @@ async def start_reprocess_job(
                     chunk_id,
                     [
                         {
-                            "speaker": utterance.get("speaker") or "Speaker",
+                            "speaker": "" if is_unrecognized_text(utterance.get("text")) else utterance.get("speaker") or "Speaker",
                             "text": utterance.get("text") or "",
                             "start_ms": start_ms,
                             "end_ms": end_ms,
@@ -1822,6 +1928,23 @@ async def get_meeting_runtime(meeting_id: str) -> Dict[str, Any]:
         return meeting_runtime(meeting_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="找不到这场会议，可能已经被删除。")
+
+
+@app.websocket("/api/meetings/{meeting_id}/runtime/ws")
+async def meeting_runtime_websocket(websocket: WebSocket, meeting_id: str) -> None:
+    await websocket.accept()
+    previous = ""
+    try:
+        while True:
+            try:
+                payload = await asyncio.to_thread(meeting_runtime, meeting_id)
+            except KeyError:
+                await websocket.send_json({"meeting_id": meeting_id, "error": "not_found"})
+                return
+            previous = await send_changed_json(websocket, payload, previous)
+            await asyncio.sleep(0.8)
+    except WebSocketDisconnect:
+        return
 
 
 @app.post("/api/meetings/{meeting_id}/ask")
@@ -1973,11 +2096,12 @@ async def upload_chunk(
     except KeyError:
         raise HTTPException(status_code=404, detail="找不到这场会议，可能已经被删除。")
 
-    requested_language = (language or "zh").strip().lower()
+    active_recording_config = recording_config.read()
+    requested_language = str(active_recording_config.get("language") or language or "zh").strip().lower()
     if requested_language not in SUPPORTED_ASR_LANGUAGES:
         raise HTTPException(status_code=400, detail="当前语言暂不支持，请换一种语言设置。")
-    requested_model = resolve_asr_model(asr_model)
-    requested_speaker_mode = resolve_speaker_mode(speaker_mode)
+    requested_model = normalize_asr_model(active_recording_config.get("asr_model") or asr_model)
+    requested_speaker_mode = resolve_speaker_mode(str(active_recording_config.get("speaker_mode") or speaker_mode))
     try:
         asr_engine = require_loaded_asr_engine(requested_model)
     except ASRUnavailable as exc:
@@ -2016,6 +2140,7 @@ async def upload_chunk(
             segment.get("text", "")
             for segment in (meeting_for_prompt.get("segments") or [])[-6:]
             if segment.get("text")
+            and not is_unrecognized_text(segment.get("text"))
         )
         result = await asyncio.to_thread(
             asr_engine.transcribe,
@@ -2083,8 +2208,12 @@ async def upload_chunk(
                     "created": 0,
                     "error": str(exc),
                 }
-        inserted = store.add_segments(meeting_id, chunk["id"], result["segments"])
+        segments_to_store = segments_or_unrecognized(chunk, result.get("segments") or [])
+        inserted = store.add_segments(meeting_id, chunk["id"], segments_to_store)
         store.update_chunk(chunk["id"], status="done")
+    except asyncio.CancelledError:
+        store.update_chunk(chunk["id"], status="error", error="请求已取消。")
+        raise
     except ASRUnavailable as exc:
         store.update_chunk(chunk["id"], status="error", error=str(exc))
         raise HTTPException(status_code=503, detail=str(exc))
@@ -2194,15 +2323,20 @@ def loaded_asr_engine_items() -> list[tuple[str, FasterWhisperASR]]:
     return items
 
 
-def active_asr_status() -> Dict[str, Any]:
+def active_asr_status(include_available: bool = False) -> Dict[str, Any]:
+    def with_available(status: Dict[str, Any]) -> Dict[str, Any]:
+        if include_available:
+            return {**status, "available_models": local_asr_models()}
+        return status
+
     for model_name, engine in loaded_asr_engine_items():
-        return {**asr_engine_status(model_name, engine), "available_models": local_asr_models()}
+        return with_available(asr_engine_status(model_name, engine))
     if asr.loading:
-        return {**asr_engine_status(ASR_MODEL, asr), "available_models": local_asr_models()}
+        return with_available(asr_engine_status(ASR_MODEL, asr))
     for model_name, engine in asr_engines.items():
         if engine.loading:
-            return {**asr_engine_status(model_name, engine), "available_models": local_asr_models()}
-    return {**asr.status(), "available_models": local_asr_models()}
+            return with_available(asr_engine_status(model_name, engine))
+    return with_available(asr.status())
 
 
 def require_loaded_asr_engine(model_name: str) -> FasterWhisperASR:
@@ -2212,54 +2346,161 @@ def require_loaded_asr_engine(model_name: str) -> FasterWhisperASR:
     return engine
 
 
+def load_asr_model_sync(model_name: str) -> Dict[str, Any]:
+    requested_model = normalize_asr_model(model_name)
+    with model_load_lock:
+        unloaded = []
+        for loaded_model, engine in loaded_asr_engine_items():
+            if loaded_model == requested_model:
+                continue
+            engine.unload()
+            unloaded.append({
+                "model": loaded_model,
+                "label": asr_model_label(loaded_model),
+            })
+
+        engine = asr_engine_for_model(requested_model)
+        engine.load()
+        if asr_model_backend(requested_model) == "funasr":
+            mark_funasr_model_installed(requested_model)
+        return {
+            "kind": "asr",
+            "model": requested_model,
+            "label": asr_model_label(requested_model),
+            "unloaded": unloaded,
+            "status": asr_engine_status(requested_model, engine),
+        }
+
+
 @app.post("/api/models/load")
 async def load_model(payload: ModelDownloadRequest) -> Dict[str, Any]:
     kind = clean_identifier(payload.kind or "asr", "asr")
     if kind != "asr":
         raise HTTPException(status_code=400, detail="当前只支持加载语音识别模型。")
-    requested_model = resolve_asr_model(payload.model)
-
-    def load_in_thread() -> Dict[str, Any]:
-        with model_load_lock:
-            unloaded = []
-            for loaded_model, engine in loaded_asr_engine_items():
-                if loaded_model == requested_model:
-                    continue
-                engine.unload()
-                unloaded.append({
-                    "model": loaded_model,
-                    "label": asr_model_label(loaded_model),
-                })
-
-            engine = asr_engine_for_model(requested_model)
-            engine.load()
-            if asr_model_backend(requested_model) == "funasr":
-                mark_funasr_model_installed(requested_model)
-            return {
-                "kind": "asr",
-                "model": requested_model,
-                "label": asr_model_label(requested_model),
-                "unloaded": unloaded,
-                "status": asr_engine_status(requested_model, engine),
-                "catalog": model_catalog(),
-            }
-
     try:
-        return await asyncio.to_thread(load_in_thread)
+        result = await asyncio.to_thread(load_asr_model_sync, payload.model)
+        return {**result, "catalog": model_catalog()}
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"模型加载失败：{exc}")
+
+
+def configured_asr_loaded(model_name: str) -> bool:
+    return any(loaded_model == model_name for loaded_model, _engine in loaded_asr_engine_items())
+
+
+def recording_config_response() -> Dict[str, Any]:
+    config = recording_config.read()
+    return {
+        "ok": True,
+        "api_revision": 3,
+        "config": config,
+        "asr": active_asr_status(),
+        "configured_model_loaded": configured_asr_loaded(config["asr_model"]),
+        "load_error": recording_model_load_error,
+        "asr_options": asr_model_options(),
+    }
+
+
+async def cached_llm_status() -> Dict[str, Any]:
+    now = time.monotonic()
+    cached_at = float(llm_status_cache.get("updated_at") or 0.0)
+    cached_value = llm_status_cache.get("value")
+    if isinstance(cached_value, dict) and cached_value and now - cached_at < LLM_STATUS_TTL_SECONDS:
+        return cached_value
+    async with llm_status_lock:
+        now = time.monotonic()
+        cached_at = float(llm_status_cache.get("updated_at") or 0.0)
+        cached_value = llm_status_cache.get("value")
+        if isinstance(cached_value, dict) and cached_value and now - cached_at < LLM_STATUS_TTL_SECONDS:
+            return cached_value
+        try:
+            value = await llm.status()
+        except Exception as exc:
+            value = {
+                "ok": False,
+                **llm.describe(),
+                "config": llm.public_config(),
+                "error": str(exc),
+            }
+        llm_status_cache["updated_at"] = now
+        llm_status_cache["value"] = value
+        return value
+
+
+async def app_status_response() -> Dict[str, Any]:
+    return {
+        **recording_config_response(),
+        "llm": await cached_llm_status(),
+    }
+
+
+async def load_recording_model_from_config() -> None:
+    global recording_model_load_error
+    config = recording_config.read()
+    try:
+        await asyncio.to_thread(load_asr_model_sync, config["asr_model"])
+        recording_model_load_error = ""
+    except Exception as exc:
+        recording_model_load_error = str(exc)
+
+
+@app.on_event("startup")
+async def load_recording_model_on_startup() -> None:
+    asyncio.create_task(load_recording_model_from_config())
+
+
+@app.get("/api/recording-config")
+async def get_recording_config() -> Dict[str, Any]:
+    return recording_config_response()
+
+
+@app.put("/api/recording-config")
+async def update_recording_config(payload: RecordingConfigRequest) -> Dict[str, Any]:
+    global recording_model_load_error
+    current = recording_config.read()
+    updates = payload.model_dump(exclude_none=True)
+    next_config = {**current, **updates}
+    requested_model = normalize_asr_model(next_config.get("asr_model"))
+    next_config["asr_model"] = requested_model
+    model_changed = requested_model != current.get("asr_model")
+    needs_load = model_changed or not configured_asr_loaded(requested_model)
+    recording_config.save(next_config)
+    try:
+        if needs_load:
+            await asyncio.to_thread(load_asr_model_sync, requested_model)
+        recording_model_load_error = ""
+    except Exception as exc:
+        recording_model_load_error = str(exc)
+        raise HTTPException(status_code=500, detail=f"模型加载失败：{exc}")
+    return recording_config_response()
+
+
+@app.websocket("/api/status/ws")
+async def status_websocket(websocket: WebSocket) -> None:
+    await websocket.accept()
+    previous = ""
+    try:
+        while True:
+            previous = await send_changed_json(websocket, await app_status_response(), previous)
+            await asyncio.sleep(1.0)
+    except WebSocketDisconnect:
+        return
 
 
 async def reprocess_asr_version(
     meeting_id: str,
     job_id: str,
     version_id: str,
+    source_version_id: str,
     language: str,
     model_name: str,
     speaker_mode: str,
     make_current: bool,
 ) -> None:
     inserted_total = 0
+    unrecognized_total = 0
     assigned_total = 0
     created_total = 0
     try:
@@ -2333,10 +2574,14 @@ async def reprocess_asr_version(
                 except SpeakerTrackingUnavailable:
                     pass
 
+            raw_segments = result.get("segments") or []
+            if not [segment for segment in raw_segments if str(segment.get("text") or "").strip()]:
+                unrecognized_total += 1
+            segments_to_store = segments_or_unrecognized(chunk, raw_segments)
             inserted = store.add_segments(
                 meeting_id,
                 chunk["id"],
-                result.get("segments") or [],
+                segments_to_store,
                 version_id=version_id,
             )
             inserted_total += len(inserted)
@@ -2344,18 +2589,22 @@ async def reprocess_asr_version(
                 segment.get("text", "")
                 for segment in inserted[-8:]
                 if segment.get("text")
+                and not is_unrecognized_text(segment.get("text"))
             ) or recent_context
             set_reprocess_state(
                 job_id,
                 progress=index,
                 inserted_segments=inserted_total,
+                unrecognized_segments=unrecognized_total,
             )
 
         settings = {
             "model": model_name,
             "language": language,
             "speaker_mode": speaker_mode,
+            "source_version_id": source_version_id,
             "inserted_segments": inserted_total,
+            "unrecognized_segments": unrecognized_total,
             "assigned_segments": assigned_total,
             "created_speakers": created_total,
         }
@@ -2368,6 +2617,7 @@ async def reprocess_asr_version(
             stage="done",
             progress=len(chunks),
             inserted_segments=inserted_total,
+            unrecognized_segments=unrecognized_total,
             assigned_segments=assigned_total,
             created_speakers=created_total,
         )
@@ -2518,6 +2768,8 @@ def repair_batches(segments: list[Dict[str, Any]]) -> list[list[Dict[str, Any]]]
     current_chars = 0
     for segment in segments:
         text = str(segment.get("text") or "")
+        if not text.strip() or is_unrecognized_text(text):
+            continue
         if current and (len(current) >= 24 or current_chars + len(text) > 2600):
             batches.append(current)
             current = []
@@ -2792,6 +3044,7 @@ async def finalize_meeting(meeting_id: str, payload: FinalizeRequest) -> Dict[st
 async def stop_meeting(meeting_id: str) -> Dict[str, Any]:
     try:
         store.update_meeting_status(meeting_id, "stopped")
+        store.mark_interrupted_chunks(meeting_id, error="录音已停止，未完成的识别已取消。")
         return store.get_meeting(meeting_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="找不到这场会议，可能已经被删除。")

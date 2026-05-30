@@ -4527,6 +4527,15 @@ a {
   color: var(--fg);
 }
 
+.app-shell .segment.unrecognized {
+  cursor: default;
+}
+
+.app-shell .segment.unrecognized .segment-text,
+.app-shell .segment.unrecognized.playing-now .segment-text {
+  color: var(--fg-4);
+}
+
 .app-shell .segment-part {
   display: inline;
   white-space: normal;

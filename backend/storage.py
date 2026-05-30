@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .config import CHUNKS_DIR, DB_PATH, ensure_runtime_dirs
-from .transcript import build_utterances
+from .transcript import build_utterances, is_unrecognized_text
 
 
 DEFAULT_SUMMARY: Dict[str, Any] = {
@@ -253,6 +253,7 @@ class MeetingStore:
             }
             for segment in segments
             if str(segment.get("text") or "").strip()
+            and not is_unrecognized_text(segment.get("text"))
         ]
         digest = hashlib.sha1(
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -347,10 +348,39 @@ class MeetingStore:
 
     def update_meeting_status(self, meeting_id: str, status: str) -> None:
         with self._lock, self._connect() as conn:
-            conn.execute(
+            result = conn.execute(
                 "UPDATE meetings SET status = ?, updated_at = ? WHERE id = ?",
                 (status, now_iso(), meeting_id),
             )
+            if result.rowcount == 0:
+                raise KeyError(meeting_id)
+
+    def mark_interrupted_chunks(
+        self,
+        meeting_id: Optional[str] = None,
+        error: str = "处理被中断，请重新识别这段音频。",
+    ) -> int:
+        active_statuses = ("saved", "converting", "transcribing", "diarizing", "identifying_speakers")
+        placeholders = ", ".join("?" for _ in active_statuses)
+        values: List[Any] = [error, *active_statuses]
+        meeting_clause = ""
+        if meeting_id is not None:
+            meeting_clause = " AND meeting_id = ?"
+            values.append(meeting_id)
+        with self._lock, self._connect() as conn:
+            if meeting_id is not None:
+                meeting = conn.execute("SELECT id FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
+                if meeting is None:
+                    raise KeyError(meeting_id)
+            result = conn.execute(
+                f"""
+                UPDATE chunks
+                SET status = 'error', error = ?
+                WHERE status IN ({placeholders}){meeting_clause}
+                """,
+                values,
+            )
+            return result.rowcount
 
     def update_meeting_title(
         self,

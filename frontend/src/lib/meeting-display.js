@@ -1,4 +1,5 @@
 export const WAVE_PATTERN = [0.35, 0.62, 0.48, 0.84, 0.58, 1.0, 0.72, 0.42, 0.68, 0.92, 0.54, 0.78];
+export const UNRECOGNIZED_TEXT = "（未识别到）";
 
 export const LANGUAGE_OPTIONS = [
   ["auto", "自动多语种"],
@@ -137,7 +138,12 @@ export function transcriptVersionName(version, fallbackId = "auto") {
 export function transcriptVersionOption(version, t = (value) => value) {
   const name = transcriptVersionName(version, version?.id);
   const time = formatTime(version?.created_at);
-  return time ? `${t(name)} · ${time}` : t(name);
+  const statusText = version?.status === "error"
+    ? t("失败")
+    : ["queued", "running"].includes(version?.status)
+      ? t("处理中")
+      : "";
+  return [t(name), time, statusText].filter(Boolean).join(" · ");
 }
 
 export function transcriptVersionHint(version, editable, t = (value, values) => value) {
@@ -275,4 +281,20 @@ export function transcriptParts(item) {
       end_ms: item?.end_ms,
     },
   ];
+}
+
+export function isUnrecognizedTranscriptText(value) {
+  return String(value || "").trim() === UNRECOGNIZED_TEXT;
+}
+
+export function isUnrecognizedTranscriptItem(item) {
+  const parts = transcriptParts(item);
+  if (parts.length > 0 && parts.every((part) => isUnrecognizedTranscriptText(part.text) || isUnrecognizedTranscriptText(part.raw_text))) {
+    return true;
+  }
+  return isUnrecognizedTranscriptText(item?.text) || isUnrecognizedTranscriptText(item?.raw_text);
+}
+
+export function recognizedTranscriptItems(items = []) {
+  return items.filter((item) => !isUnrecognizedTranscriptItem(item));
 }

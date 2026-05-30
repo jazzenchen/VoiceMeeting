@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from .storage import DEFAULT_SUMMARY
+from .transcript import UNRECOGNIZED_TEXT, is_unrecognized_text
 from .vibearound import VibeAroundClient
 
 
@@ -208,10 +209,39 @@ def _clean_inline_text(text: str) -> str:
     return cleaned
 
 
+def _is_unrecognized_segment(item: Dict[str, Any]) -> bool:
+    return is_unrecognized_text(item.get("text")) or is_unrecognized_text(item.get("raw_text"))
+
+
+def _format_offset(value: Any) -> str:
+    try:
+        total_seconds = max(0, int(value or 0) // 1000)
+    except (TypeError, ValueError):
+        total_seconds = 0
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
+
+
+def _display_transcript_text(item: Dict[str, Any]) -> str:
+    if _is_unrecognized_segment(item):
+        start_ms = int(item.get("start_ms") or 0)
+        end_ms = int(item.get("end_ms") or start_ms)
+        return f"{_format_offset(start_ms)} - {_format_offset(end_ms)}{UNRECOGNIZED_TEXT}"
+    return str(item.get("text") or "").strip()
+
+
+def _recognized_transcript_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [item for item in items if not _is_unrecognized_segment(item)]
+
+
 def _candidate_sentences(items: List[Dict[str, Any]], max_items: int = 240) -> List[str]:
     candidates: List[str] = []
     seen: set[str] = set()
-    for item in items[:max_items]:
+    for item in _recognized_transcript_items(items)[:max_items]:
         text = _clean_inline_text(item.get("text") or item.get("raw_text") or "")
         if not text:
             continue
@@ -366,18 +396,21 @@ def final_markdown_looks_incomplete(markdown: str, require_transcript: bool = Fa
 def _transcript_lines(meeting: Dict[str, Any]) -> List[str]:
     lines = []
     for segment in meeting.get("utterances") or meeting.get("segments", []):
-        text = (segment.get("text") or "").strip()
+        text = _display_transcript_text(segment)
         if not text:
             continue
-        speaker = segment.get("speaker") or "Speaker"
-        lines.append(f"- **{speaker}**：{text}")
+        if _is_unrecognized_segment(segment):
+            lines.append(f"- {text}")
+        else:
+            speaker = segment.get("speaker") or "Speaker"
+            lines.append(f"- **{speaker}**：{text}")
     return lines
 
 
 def _transcript_for_prompt(meeting: Dict[str, Any], max_chars: Optional[int] = None) -> str:
     lines = []
     total = 0
-    for segment in meeting.get("utterances") or meeting.get("segments", []):
+    for segment in _recognized_transcript_items(meeting.get("utterances") or meeting.get("segments", [])):
         text = (segment.get("text") or "").strip()
         if not text:
             continue
@@ -467,9 +500,10 @@ class MeetingSummarizer:
         if not new_segments:
             return _normalize_summary(current_summary or {})
 
+        recognized_segments = _recognized_transcript_items(new_segments)
         transcript = "\n".join(
             f"{segment.get('speaker') or 'Speaker'}: {segment.get('text', '').strip()}"
-            for segment in new_segments
+            for segment in recognized_segments
             if segment.get("text")
         )
         if not transcript.strip():
@@ -495,7 +529,7 @@ class MeetingSummarizer:
             return fallback_incremental_summary(current_summary, new_segments, str(exc))
 
     async def rebuild(self, meeting: Dict[str, Any]) -> Dict[str, Any]:
-        transcript_items = meeting.get("utterances") or meeting.get("segments", [])
+        transcript_items = _recognized_transcript_items(meeting.get("utterances") or meeting.get("segments", []))
         summary = empty_summary()
         batch: List[Dict[str, Any]] = []
         batch_chars = 0
@@ -601,6 +635,7 @@ class MeetingSummarizer:
             }
             for segment in segments
             if segment.get("id") and str(segment.get("text") or "").strip()
+            and not _is_unrecognized_segment(segment)
         ]
         if not payload_segments:
             return {}
@@ -641,7 +676,7 @@ class MeetingSummarizer:
         transcript_lines = []
         total_chars = 0
         max_chars = 52000
-        for segment in transcript_items:
+        for segment in _recognized_transcript_items(transcript_items):
             text = str(segment.get("text") or "").strip()
             if not text:
                 continue
@@ -689,7 +724,7 @@ class MeetingSummarizer:
 
 
 def build_local_markdown(meeting: Dict[str, Any], include_transcript: bool = False) -> str:
-    transcript_items = meeting.get("segments") or meeting.get("utterances") or []
+    transcript_items = _recognized_transcript_items(meeting.get("segments") or meeting.get("utterances") or [])
     summary = _local_summary_from_segments(transcript_items, {})
     title = meeting.get("title") or "Untitled Meeting"
     created = meeting.get("created_at") or datetime.utcnow().isoformat()

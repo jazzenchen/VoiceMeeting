@@ -1,11 +1,11 @@
 import { Download, FileText } from "lucide-react";
 
 import { MarkdownPreview } from "@/components/meeting/MarkdownPreview";
-import { transcriptParts, transcriptVersionName } from "@/lib/meeting-display";
+import { isUnrecognizedTranscriptItem, transcriptParts, transcriptVersionName } from "@/lib/meeting-display";
 import { useI18n } from "@/lib/i18n";
 
 function flattenTranscript(transcriptItems) {
-  return transcriptItems.flatMap((item) => (
+  return transcriptItems.filter((item) => !isUnrecognizedTranscriptItem(item)).flatMap((item) => (
     transcriptParts(item).map((part) => ({
       ...part,
       speaker: part.speaker || item.speaker,
@@ -52,7 +52,7 @@ export function NotesPane({
           <button
             className={`finish-button btn-ghost primary ${finalNotesWorking ? "working" : ""}`}
             onClick={finalize}
-            disabled={!meeting || !assistantReady || recording || finalNotesWorking}
+            disabled={!meeting || !assistantReady || recording || finalNotesWorking || !hasContent}
             title={assistantUnavailableReason || t("生成完整纪要")}
           >
             {finalNotesWorking ? <span className="notes-spinner" aria-hidden="true" /> : <FileText size={15} />}

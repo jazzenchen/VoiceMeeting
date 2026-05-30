@@ -205,16 +205,13 @@ class FasterWhisperASR:
             requested_language = None
 
         vad_segments = self.detect_speech(wav_path)
-        if not vad_segments:
-            return self.empty_result(language, requested_language, auto_language or mixed_language)
-
         speech_ms = sum(max(0, int(item["end_ms"]) - int(item["start_ms"])) for item in vad_segments)
         initial_prompt = self.clean_context_prompt(context_prompt) if speech_ms >= ASR_CONTEXT_MIN_SPEECH_MS else None
 
         segments_iter, info = model.transcribe(
             str(wav_path),
             language=requested_language,
-            vad_filter=True,
+            vad_filter=bool(vad_segments),
             beam_size=5,
             temperature=0.0,
             no_speech_threshold=0.6,
@@ -558,9 +555,6 @@ class MlxWhisperASR(FasterWhisperASR):
             requested_language = None
 
         vad_segments = self.detect_speech(wav_path)
-        if not vad_segments:
-            return self.empty_result(language, requested_language, auto_language or mixed_language)
-
         speech_ms = sum(max(0, int(item["end_ms"]) - int(item["start_ms"])) for item in vad_segments)
         initial_prompt = self.clean_context_prompt(context_prompt) if speech_ms >= ASR_CONTEXT_MIN_SPEECH_MS else None
 
@@ -730,8 +724,6 @@ class FunASRASR(FasterWhisperASR):
     ) -> Dict[str, Any]:
         model = self.require_loaded()
         vad_segments = self.detect_speech(wav_path)
-        if not vad_segments:
-            return self.empty_result(language, language or self.language, True)
 
         kwargs: Dict[str, Any] = {
             "input": str(wav_path),
