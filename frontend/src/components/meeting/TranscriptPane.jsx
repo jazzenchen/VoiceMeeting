@@ -244,10 +244,10 @@ export function TranscriptPane({
 
   return (
     <section className="transcript-pane">
-      <div className="pane-header">
-        <div>
+      <div className="pane-header transcript-pane-header">
+        <div className="transcript-heading-row">
           <h2>{t("实时文字")}</h2>
-          <div className="transcript-meta-line">
+          <div className="transcript-meta-line" aria-label={t("选择稿件版本")}>
             {versions.length > 0 && (
               <div className="transcript-version-menu" ref={versionMenuRef}>
                 <button

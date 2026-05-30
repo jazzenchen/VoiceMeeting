@@ -886,6 +886,24 @@ a {
   flex: 1 1 180px;
 }
 
+.transcript-heading-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.transcript-heading-row h2 {
+  flex: 0 0 auto;
+}
+
+.transcript-heading-row .transcript-meta-line {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-top: 0;
+}
+
 .transcript-meta-line {
   margin-top: 5px;
   display: flex;
@@ -895,6 +913,13 @@ a {
   color: #687783;
   font-size: 12px;
   line-height: 1.4;
+}
+
+.transcript-meta-line > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .transcript-version-select {
@@ -914,6 +939,7 @@ a {
 
 .transcript-version-menu {
   position: relative;
+  flex: 0 1 260px;
   max-width: min(260px, 100%);
 }
 
