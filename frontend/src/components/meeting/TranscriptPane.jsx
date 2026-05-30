@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
+  ChevronDown,
   CircleEllipsis,
   Download,
   FilePenLine,
@@ -87,7 +88,9 @@ export function TranscriptPane({
   const { t } = useI18n();
   const segmentRefs = useRef(new Map());
   const toolsRef = useRef(null);
+  const versionMenuRef = useRef(null);
   const [toolsOpen, setToolsOpen] = useState(false);
+  const [versionMenuOpen, setVersionMenuOpen] = useState(false);
   const versions = useMemo(() => {
     if (Array.isArray(transcriptVersions) && transcriptVersions.length > 0) {
       return transcriptVersions;
@@ -158,7 +161,27 @@ export function TranscriptPane({
   }, [toolsOpen]);
 
   useEffect(() => {
-    if (recording) setToolsOpen(false);
+    if (!versionMenuOpen) return undefined;
+    const handlePointerDown = (event) => {
+      if (versionMenuRef.current?.contains(event.target)) return;
+      setVersionMenuOpen(false);
+    };
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") setVersionMenuOpen(false);
+    };
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [versionMenuOpen]);
+
+  useEffect(() => {
+    if (recording) {
+      setToolsOpen(false);
+      setVersionMenuOpen(false);
+    }
   }, [recording]);
 
   const advancedActions = [
@@ -210,6 +233,15 @@ export function TranscriptPane({
     action.onSelect?.();
   };
 
+  const selectVersion = (version) => {
+    if (!version?.id || version.id === selectedVersionId) {
+      setVersionMenuOpen(false);
+      return;
+    }
+    setVersionMenuOpen(false);
+    activateTranscriptVersion?.(version.id);
+  };
+
   return (
     <section className="transcript-pane">
       <div className="pane-header">
@@ -217,19 +249,40 @@ export function TranscriptPane({
           <h2>{t("实时文字")}</h2>
           <div className="transcript-meta-line">
             {versions.length > 0 && (
-              <select
-                className="transcript-version-select"
-                value={selectedVersionId}
-                onChange={(event) => activateTranscriptVersion?.(event.target.value)}
-                disabled={!meeting || reprocessWorking || editBusy || versions.length < 2}
-                title={t("选择稿件版本")}
-              >
-                {versions.map((version) => (
-                  <option key={version.id} value={version.id}>
-                    {transcriptVersionOption(version, t)}
-                  </option>
-                ))}
-              </select>
+              <div className="transcript-version-menu" ref={versionMenuRef}>
+                <button
+                  type="button"
+                  className="transcript-version-trigger"
+                  onClick={() => setVersionMenuOpen((value) => !value)}
+                  disabled={!meeting || reprocessWorking || editBusy || versions.length < 2}
+                  title={t("选择稿件版本")}
+                  aria-haspopup="listbox"
+                  aria-expanded={versionMenuOpen}
+                >
+                  <span>{transcriptVersionOption(selectedVersion || versions[0], t)}</span>
+                  <ChevronDown size={13} />
+                </button>
+                {versionMenuOpen && (
+                  <div className="transcript-version-dropdown" role="listbox" aria-label={t("选择稿件版本")}>
+                    {versions.map((version) => {
+                      const active = version.id === selectedVersionId;
+                      return (
+                        <button
+                          type="button"
+                          role="option"
+                          aria-selected={active}
+                          className={active ? "active" : ""}
+                          key={version.id}
+                          onClick={() => selectVersion(version)}
+                        >
+                          <span>{transcriptVersionOption(version, t)}</span>
+                          {active && <Check size={13} />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             )}
             {canDeleteSelectedVersion && (
               <button
