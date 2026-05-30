@@ -572,17 +572,56 @@ function applyInputGain(input, gain) {
   return frame;
 }
 
+function smoothLiveBars(values) {
+  if (!values.length) return [];
+  return values.map((value, index) => {
+    const prev = values[index - 1] ?? value;
+    const next = values[index + 1] ?? value;
+    return Math.min(0.84, Math.max(0.018, prev * 0.18 + value * 0.64 + next * 0.18));
+  });
+}
+
 function compressWaveformBars(values, targetCount = LIVE_WAVEFORM_BAR_COUNT) {
-  if (values.length <= targetCount) return values.slice();
-  return Array.from({ length: targetCount }, (_, index) => {
+  if (values.length <= targetCount) return smoothLiveBars(values);
+  const bars = Array.from({ length: targetCount }, (_, index) => {
     const start = Math.floor(index * values.length / targetCount);
     const end = Math.max(start + 1, Math.floor((index + 1) * values.length / targetCount));
     let peak = 0;
+    let total = 0;
+    let count = 0;
     for (let item = start; item < end; item += 1) {
-      peak = Math.max(peak, values[item] || 0);
+      const value = values[item] || 0;
+      peak = Math.max(peak, value);
+      total += value;
+      count += 1;
     }
-    return peak;
+    const mean = count ? total / count : 0;
+    return Math.min(0.84, mean * 0.48 + peak * 0.52);
   });
+  return smoothLiveBars(bars);
+}
+
+function shapeLiveWaveLevel(rms, peak, ceilingRef, floorRef) {
+  const energy = Math.max(0, Number(rms) || 0) * 0.78 + Math.max(0, Number(peak) || 0) * 0.22;
+  const previousCeiling = Math.max(0.018, Number(ceilingRef.current) || 0.055);
+  const previousFloor = Math.max(0.0006, Number(floorRef.current) || 0.002);
+  const floorTarget = energy < previousCeiling * 0.35 ? energy : previousFloor;
+  const nextFloor = Math.min(0.025, Math.max(0.0006, previousFloor + (floorTarget - previousFloor) * 0.008));
+  const ceilingTarget = Math.max(energy, nextFloor + 0.018, 0.035);
+  const ceilingSpeed = ceilingTarget > previousCeiling ? 0.22 : 0.012;
+  const nextCeiling = previousCeiling + (ceilingTarget - previousCeiling) * ceilingSpeed;
+  floorRef.current = nextFloor;
+  ceilingRef.current = nextCeiling;
+
+  const normalized = Math.max(0, Math.min(1, (energy - nextFloor * 0.85) / Math.max(0.012, nextCeiling - nextFloor * 0.85)));
+  if (normalized <= 0.01) return 0.018;
+  const compressed = Math.log1p(normalized * 5) / Math.log1p(5);
+  return Math.min(0.84, Math.max(0.026, Math.pow(compressed, 0.86) * 0.78 + 0.026));
+}
+
+function displayMicLevel(level) {
+  const shaped = Math.pow(Math.max(0, Number(level) || 0) * 10, 0.66) * 0.72 + 0.04;
+  return Math.min(0.92, Math.max(0.08, shaped));
 }
 
 function audioBufferToMono(audioBuffer) {
@@ -850,6 +889,8 @@ function App() {
   const recordingConfigRef = useRef(recordingConfig);
   const liveWaveformRef = useRef([]);
   const liveWaveformEmitRef = useRef(0);
+  const liveWaveformCeilingRef = useRef(0.055);
+  const liveWaveformFloorRef = useRef(0.002);
   const previousSettingsOpenRef = useRef(false);
   const serviceReadyOnceRef = useRef(false);
   const autoLoadedMeetingRef = useRef(false);
@@ -2099,8 +2140,12 @@ function App() {
       const activeConfig = clampRecordingConfig(recordingConfigRef.current);
       const frame = applyInputGain(input, activeConfig.inputGain);
       let sum = 0;
+      let peak = 0;
       for (let index = 0; index < frame.length; index += 1) {
-        sum += frame[index] * frame[index];
+        const sample = frame[index];
+        const abs = Math.abs(sample);
+        peak = Math.max(peak, abs);
+        sum += sample * sample;
       }
       const level = Math.sqrt(sum / frame.length);
       setVadLevel(level);
@@ -2108,7 +2153,7 @@ function App() {
       const startMs = totalSamplesRef.current * 1000 / audioSampleRateRef.current;
       totalSamplesRef.current += frame.length;
       const endMs = totalSamplesRef.current * 1000 / audioSampleRateRef.current;
-      const shapedLevel = Math.max(0.025, Math.min(1, Math.pow(Math.max(0, level * 24), 0.72)));
+      const shapedLevel = shapeLiveWaveLevel(level, peak, liveWaveformCeilingRef, liveWaveformFloorRef);
       liveWaveformRef.current.push(shapedLevel);
       if (liveWaveformRef.current.length > LIVE_WAVEFORM_BAR_COUNT * 8) {
         liveWaveformRef.current = liveWaveformRef.current.slice(-LIVE_WAVEFORM_BAR_COUNT * 8);
@@ -2172,6 +2217,8 @@ function App() {
       setLiveRecordingMs(0);
       liveWaveformRef.current = [];
       liveWaveformEmitRef.current = 0;
+      liveWaveformCeilingRef.current = 0.055;
+      liveWaveformFloorRef.current = 0.002;
       setPipelineStatus("录音中");
       await refreshMeetings();
 
@@ -2790,7 +2837,7 @@ function App() {
   const downloadTranscript = useCallback(() => downloadMeetingFile("transcript"), [downloadMeetingFile]);
   const downloadNotes = useCallback(() => downloadMeetingFile("notes"), [downloadMeetingFile]);
 
-  const micLevel = Math.min(1, Math.max(0.08, vadLevel * 18));
+  const micLevel = displayMicLevel(vadLevel);
   const normalizedRecordingConfigDraft = clampRecordingConfig(recordingConfigDraft);
   const recordingConfigDirty = !recordingConfigsEqual(recordingConfig, recordingConfigDraft)
     || selectedMicDraftId !== selectedMicId;
