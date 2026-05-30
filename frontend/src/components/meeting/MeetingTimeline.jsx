@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
-import { AudioWaveform, ChartArea, ChartLine, Pause, Play, SkipBack, SkipForward } from "lucide-react";
+import { Pause, Play, SkipBack, SkipForward } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { formatOffset, transcriptParts } from "@/lib/meeting-display";
@@ -19,12 +19,6 @@ const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8788";
 const WAVEFORM_BAR_COUNT = 256;
 const TIMELINE_EDGE_PAD_PX = 8;
 const JUMP_STEPS = [5000, 10000, 20000];
-const TIMELINE_VIEW_STORAGE_KEY = "voice-meeting-timeline-view";
-const TIMELINE_VISUAL_MODES = [
-  { id: "waveform", label: "波形", title: "柱状波形视图", Icon: AudioWaveform },
-  { id: "line", label: "折线", title: "折线视图", Icon: ChartLine },
-  { id: "area", label: "包络", title: "包络视图", Icon: ChartArea },
-];
 const TOPIC_COMMON_TERMS = new Set([
   "一个",
   "这个",
@@ -283,43 +277,6 @@ function clamp01(value) {
   return Math.max(0, Math.min(1, Number(value) || 0));
 }
 
-function loadTimelineViewMode() {
-  if (typeof window === "undefined") return "waveform";
-  const stored = window.localStorage?.getItem(TIMELINE_VIEW_STORAGE_KEY);
-  return TIMELINE_VISUAL_MODES.some((mode) => mode.id === stored) ? stored : "waveform";
-}
-
-function saveTimelineViewMode(mode) {
-  if (typeof window === "undefined") return;
-  window.localStorage?.setItem(TIMELINE_VIEW_STORAGE_KEY, mode);
-}
-
-function weightedLocalAverage(values, index, radius) {
-  let total = 0;
-  let weightTotal = 0;
-  for (let offset = -radius; offset <= radius; offset += 1) {
-    const position = index + offset;
-    if (position < 0 || position >= values.length) continue;
-    const weight = radius + 1 - Math.abs(offset);
-    total += values[position] * weight;
-    weightTotal += weight;
-  }
-  return weightTotal ? total / weightTotal : values[index] || 0;
-}
-
-function timelineBarsForMode(bars, mode) {
-  if (mode === "waveform") return bars;
-  const amplitudes = bars.map((bar) => clamp01(bar?.amplitude));
-  const radius = mode === "area" ? 3 : 2;
-  return bars.map((bar, index) => {
-    const smooth = weightedLocalAverage(amplitudes, index, radius);
-    return {
-      ...bar,
-      amplitude: Math.min(0.88, Math.max(bar?.active ? 0.035 : 0.018, Math.pow(smooth, 0.82) * 0.78 + 0.02)),
-    };
-  });
-}
-
 function shapeAudioAmplitude(value, floor, ceiling) {
   if (!Number.isFinite(value) || value <= 0) return 0;
   const range = Math.max(ceiling - floor, ceiling * 0.25, 0.000001);
@@ -437,7 +394,6 @@ export function MeetingTimeline({
   const [scrubbing, setScrubbing] = useState(false);
   const [scrubMs, setScrubMs] = useState(null);
   const [hoverMs, setHoverMs] = useState(null);
-  const [timelineViewMode, setTimelineViewMode] = useState(loadTimelineViewMode);
   const waveformCacheRef = useRef(new Map());
   const parts = useMemo(() => flattenParts(transcriptItems, chunks), [chunks, transcriptItems]);
   const lastPartEnd = Math.max(0, ...parts.map((part) => Number(part.end_ms) || Number(part.start_ms) || 0));
@@ -573,12 +529,6 @@ export function MeetingTimeline({
       };
     })
   ), [audioWaveform, durationMs, liveBars, liveMode, parts, speakerIndexByName]);
-  const visibleBars = useMemo(() => timelineBarsForMode(bars, timelineViewMode), [bars, timelineViewMode]);
-
-  const selectTimelineViewMode = (mode) => {
-    setTimelineViewMode(mode);
-    saveTimelineViewMode(mode);
-  };
 
   const jumpBy = (direction) => {
     onJump(Math.max(0, Math.min(durationMs, playheadMs + direction * jumpStepMs)));
@@ -626,22 +576,6 @@ export function MeetingTimeline({
           <span className="timeline-label">Acoustic timeline</span>
           <span className="tab-tag">{topics.length} topics</span>
         </div>
-        <div className="tl-head-controls">
-          <div className="tl-view-switch" aria-label={t("切换时间线视图")}>
-            {TIMELINE_VISUAL_MODES.map(({ id, label, title, Icon }) => (
-              <button
-                type="button"
-                className={timelineViewMode === id ? "tl-view-button active" : "tl-view-button"}
-                key={id}
-                onClick={() => selectTimelineViewMode(id)}
-                title={t(title)}
-                aria-pressed={timelineViewMode === id}
-              >
-                <Icon size={13} />
-                <span>{t(label)}</span>
-              </button>
-            ))}
-          </div>
         {liveMode ? (
           <div className="tl-live-clock" aria-label={t("录制时长")}>
             <span>{t("录制中")}</span>
@@ -701,7 +635,6 @@ export function MeetingTimeline({
           </span>
         </div>
         )}
-        </div>
       </div>
 
       <div
@@ -741,9 +674,8 @@ export function MeetingTimeline({
         >
           <Suspense fallback={<div className="tl-three-host" aria-hidden="true" />}>
             <TimelineThreeCanvas
-              bars={visibleBars}
+              bars={bars}
               marks={marks}
-              visualMode={timelineViewMode}
               playheadRatio={pct(displayPlayheadMs) / 100}
               hoverRatio={Number.isFinite(hoverMs) ? pct(hoverMs) / 100 : null}
               loadingProgress={waveformLoading && !liveMode ? waveformProgress : 0}

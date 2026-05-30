@@ -169,43 +169,6 @@ function createRuntime(host) {
   scene.add(progressMesh);
 
   const barGeometry = new THREE.PlaneGeometry(1, 1);
-  const envelopeTopLine = new THREE.Line(
-    new THREE.BufferGeometry(),
-    new THREE.LineBasicMaterial({
-      color: palette.accent,
-      transparent: true,
-      opacity: 0.92,
-      depthWrite: false,
-    }),
-  );
-  const envelopeBottomLine = new THREE.Line(
-    new THREE.BufferGeometry(),
-    new THREE.LineBasicMaterial({
-      color: palette.accent,
-      transparent: true,
-      opacity: 0.34,
-      depthWrite: false,
-    }),
-  );
-  const envelopeArea = new THREE.Mesh(
-    new THREE.BufferGeometry(),
-    new THREE.MeshBasicMaterial({
-      color: palette.accent,
-      transparent: true,
-      opacity: 0.14,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    }),
-  );
-  envelopeArea.renderOrder = 1;
-  envelopeTopLine.renderOrder = 3;
-  envelopeBottomLine.renderOrder = 3;
-  envelopeArea.visible = false;
-  envelopeTopLine.visible = false;
-  envelopeBottomLine.visible = false;
-  scene.add(envelopeArea);
-  scene.add(envelopeTopLine);
-  scene.add(envelopeBottomLine);
 
   const pointerMaterial = new THREE.MeshBasicMaterial({
     color: palette.fg,
@@ -243,9 +206,6 @@ function createRuntime(host) {
     barMeshes: new Map(),
     barMaterials: new Map(),
     barCapacity: 0,
-    envelopeArea,
-    envelopeTopLine,
-    envelopeBottomLine,
     progressMesh,
     progressMaterial,
     playheadLine,
@@ -268,9 +228,6 @@ function updatePalette(runtime, host) {
   runtime.progressMaterial.color.copy(runtime.palette.accent);
   runtime.pointerMaterial.color.copy(runtime.palette.fg);
   runtime.hoverMaterial.color.copy(runtime.palette.fg);
-  runtime.envelopeArea.material.color.copy(runtime.palette.accent);
-  runtime.envelopeTopLine.material.color.copy(runtime.palette.accent);
-  runtime.envelopeBottomLine.material.color.copy(runtime.palette.accent);
   for (const [key, material] of runtime.barMaterials.entries()) {
     material.color.copy(barGroupColor(key, runtime.palette));
   }
@@ -326,21 +283,6 @@ function barGroupKey(bar) {
   return bar.hasAudio ? `speaker-${speakerIndex}` : `synthetic-${speakerIndex}`;
 }
 
-function replaceGeometry(object, positions) {
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-  geometry.computeBoundingSphere();
-  object.geometry.dispose();
-  object.geometry = geometry;
-}
-
-function setMeshesHidden(runtime) {
-  for (const mesh of runtime.barMeshes.values()) {
-    mesh.count = 0;
-    mesh.visible = false;
-  }
-}
-
 function updateLoadingProgress(runtime, loadingProgress) {
   const progress = clamp01(loadingProgress);
   const laneWidth = drawWidthRatio(runtime);
@@ -349,13 +291,8 @@ function updateLoadingProgress(runtime, loadingProgress) {
   runtime.progressMesh.scale.x = laneWidth * progress;
 }
 
-function updateBars(runtime, bars = [], loadingProgress = 0, visualMode = "waveform") {
-  const meshes = ensureBarMeshes(runtime, Math.max(1, bars.length));
-  if (visualMode !== "waveform") {
-    setMeshesHidden(runtime);
-    updateLoadingProgress(runtime, loadingProgress);
-    return;
-  }
+function updateBars(runtime, bars = [], loadingProgress = 0) {
+  const meshes = ensureBarMeshes(runtime, bars.length);
   const offsets = new Map(BAR_GROUP_KEYS.map((key) => [key, 0]));
   const count = Math.max(1, bars.length);
   const laneWidth = drawWidthRatio(runtime);
@@ -386,65 +323,6 @@ function updateBars(runtime, bars = [], loadingProgress = 0, visualMode = "wavef
   }
 
   updateLoadingProgress(runtime, loadingProgress);
-}
-
-function updateEnvelope(runtime, bars = [], visualMode = "waveform") {
-  const lineMode = visualMode === "line";
-  const areaMode = visualMode === "area";
-  if ((!lineMode && !areaMode) || bars.length < 2) {
-    runtime.envelopeArea.visible = false;
-    runtime.envelopeTopLine.visible = false;
-    runtime.envelopeBottomLine.visible = false;
-    return;
-  }
-
-  const count = bars.length;
-  const maxHeight = TRACK_BOTTOM - TRACK_TOP;
-  const amplitudes = bars.map((bar) => clamp01(bar?.amplitude));
-  const linePositions = [];
-  const topPositions = [];
-  const bottomPositions = [];
-  const areaPositions = [];
-
-  for (let index = 0; index < count; index += 1) {
-    const x = mapTimelineX(runtime, (index + 0.5) / count);
-    const amp = amplitudes[index];
-    if (lineMode) {
-      const y = TRACK_BOTTOM - amp * maxHeight * 0.9;
-      linePositions.push(x, y, 3);
-    } else {
-      const halfHeight = Math.max(0.006, amp * maxHeight * 0.45);
-      topPositions.push(x, BAR_CENTER_Y - halfHeight, 3);
-      bottomPositions.push(x, BAR_CENTER_Y + halfHeight, 3);
-    }
-  }
-
-  if (lineMode) {
-    replaceGeometry(runtime.envelopeTopLine, linePositions);
-    runtime.envelopeTopLine.visible = true;
-    runtime.envelopeBottomLine.visible = false;
-    runtime.envelopeArea.visible = false;
-    return;
-  }
-
-  for (let index = 0; index < count - 1; index += 1) {
-    const topOffset = index * 3;
-    const nextTopOffset = (index + 1) * 3;
-    const bottomOffset = index * 3;
-    const nextBottomOffset = (index + 1) * 3;
-    const topA = topPositions.slice(topOffset, topOffset + 3);
-    const topB = topPositions.slice(nextTopOffset, nextTopOffset + 3);
-    const bottomA = bottomPositions.slice(bottomOffset, bottomOffset + 3);
-    const bottomB = bottomPositions.slice(nextBottomOffset, nextBottomOffset + 3);
-    areaPositions.push(...topA, ...bottomA, ...topB, ...topB, ...bottomA, ...bottomB);
-  }
-
-  replaceGeometry(runtime.envelopeTopLine, topPositions);
-  replaceGeometry(runtime.envelopeBottomLine, bottomPositions);
-  replaceGeometry(runtime.envelopeArea, areaPositions);
-  runtime.envelopeTopLine.visible = true;
-  runtime.envelopeBottomLine.visible = true;
-  runtime.envelopeArea.visible = true;
 }
 
 function clearMarkers(runtime) {
@@ -514,9 +392,6 @@ function destroyRuntime(runtime, host) {
   }
   runtime.barGeometry.dispose();
   runtime.markerGeometry.dispose();
-  disposeObject(runtime.envelopeArea);
-  disposeObject(runtime.envelopeTopLine);
-  disposeObject(runtime.envelopeBottomLine);
   disposeObject(runtime.progressMesh);
   disposeObject(runtime.playheadLine);
   disposeObject(runtime.hoverLine);
@@ -531,23 +406,21 @@ export function TimelineThreeCanvas({
   marks,
   playheadRatio,
   hoverRatio,
-  visualMode = "waveform",
   loadingProgress = 0,
   edgePadPx = DEFAULT_EDGE_PAD_PX,
 }) {
   const hostRef = useRef(null);
   const runtimeRef = useRef(null);
-  const latestPropsRef = useRef({ bars, marks, playheadRatio, hoverRatio, visualMode, loadingProgress, edgePadPx });
+  const latestPropsRef = useRef({ bars, marks, playheadRatio, hoverRatio, loadingProgress, edgePadPx });
 
   useEffect(() => {
-    latestPropsRef.current = { bars, marks, playheadRatio, hoverRatio, visualMode, loadingProgress, edgePadPx };
-  }, [bars, edgePadPx, hoverRatio, loadingProgress, marks, playheadRatio, visualMode]);
+    latestPropsRef.current = { bars, marks, playheadRatio, hoverRatio, loadingProgress, edgePadPx };
+  }, [bars, edgePadPx, hoverRatio, loadingProgress, marks, playheadRatio]);
 
   const applyProps = (runtime, host, props) => {
     runtime.edgePadPx = props.edgePadPx;
     updatePalette(runtime, host);
-    updateBars(runtime, props.bars, props.loadingProgress, props.visualMode);
-    updateEnvelope(runtime, props.bars, props.visualMode);
+    updateBars(runtime, props.bars, props.loadingProgress);
     updateMarkers(runtime, props.marks);
     updatePointers(runtime, props.playheadRatio, props.hoverRatio);
     render(runtime);
@@ -577,7 +450,7 @@ export function TimelineThreeCanvas({
     const runtime = runtimeRef.current;
     if (!host || !runtime) return;
     applyProps(runtime, host, latestPropsRef.current);
-  }, [bars, edgePadPx, hoverRatio, loadingProgress, marks, playheadRatio, visualMode]);
+  }, [bars, edgePadPx, hoverRatio, loadingProgress, marks, playheadRatio]);
 
   return <div className="tl-three-host" ref={hostRef} aria-hidden="true" />;
 }
