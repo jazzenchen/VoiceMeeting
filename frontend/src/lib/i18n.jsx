@@ -52,6 +52,7 @@ const EN = {
   "自动校对文字": "Auto proofread",
   "整理段落": "Organize paragraphs",
   "高级操作": "Advanced actions",
+  "文字工具": "Transcript tools",
   "编辑副本": "Edit copy",
   "创建可编辑副本": "Create editable copy",
   "下载逐字稿": "Download transcript",

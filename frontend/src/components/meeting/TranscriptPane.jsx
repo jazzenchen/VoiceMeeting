@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
+  CircleEllipsis,
   Download,
   FilePenLine,
   ListTree,
@@ -12,7 +13,6 @@ import {
   Sparkles,
   Trash2,
   Users,
-  Wrench,
   X,
 } from "lucide-react";
 
@@ -251,16 +251,17 @@ export function TranscriptPane({
             <>
             <div className="transcript-action-menu" ref={toolsRef}>
               <button
-                className="playback-button icon-only transcript-menu-trigger"
+                className="playback-button transcript-menu-trigger"
                 type="button"
                 onClick={() => setToolsOpen((value) => !value)}
                 disabled={!meeting}
-                title={t("高级操作")}
-                aria-label={t("高级操作")}
+                title={t("文字工具")}
+                aria-label={t("文字工具")}
                 aria-haspopup="menu"
                 aria-expanded={toolsOpen}
               >
-                <Wrench size={15} />
+                <CircleEllipsis size={15} />
+                <span>{t("文字工具")}</span>
               </button>
               {toolsOpen && (
                 <div className="transcript-action-dropdown" role="menu">
