@@ -392,6 +392,11 @@ a {
   appearance: none;
 }
 
+.select-input option:disabled,
+.select-input option.missing-option {
+  color: #8a97a2;
+}
+
 .title-input:focus,
 .select-input:focus {
   border-color: #2f7dbd;
@@ -2348,6 +2353,11 @@ a {
   color: var(--fg);
   border-color: var(--vm-border);
   outline: none;
+}
+
+.app-shell .select-input option:disabled,
+.app-shell .select-input option.missing-option {
+  color: var(--fg-4);
 }
 
 .app-shell .title-input:focus,

@@ -504,6 +504,7 @@ def model_catalog() -> Dict[str, Any]:
 
 def asr_model_options() -> list[Dict[str, Any]]:
     options: list[Dict[str, Any]] = []
+    installed_models = set(discovered_asr_models())
     catalog_groups: list[tuple[str, str, Dict[str, Dict[str, Any]]]] = [
         ("faster-whisper", "通用", ASR_MODEL_CATALOG),
         ("funasr", "FunASR", FUNASR_MODEL_CATALOG),
@@ -519,6 +520,7 @@ def asr_model_options() -> list[Dict[str, Any]]:
                     "backend": backend,
                     "backend_label": backend_label,
                     "base_model": meta.get("base_model") or name,
+                    "installed": name in installed_models,
                 }
             )
     return options

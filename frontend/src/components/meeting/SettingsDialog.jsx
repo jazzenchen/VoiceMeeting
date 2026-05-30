@@ -35,6 +35,10 @@ export function SettingsDialog({
   micDevices,
   recordingAsrModelValue,
   updateRecordingConfig,
+  saveRecordingConfig,
+  recordingConfigSaving,
+  recordingConfigDirty,
+  recordingConfigError,
   modelLoading,
   selectableAsrModels,
   asrModelGroups,
@@ -64,7 +68,7 @@ export function SettingsDialog({
 }) {
   const { t } = useI18n();
   if (!open) return null;
-  const saving = llmConfigSaving || promptConfigSaving;
+  const saving = llmConfigSaving || promptConfigSaving || recordingConfigSaving;
 
   return (
     <div
@@ -161,6 +165,10 @@ export function SettingsDialog({
                 micDevices={micDevices}
                 recordingAsrModelValue={recordingAsrModelValue}
                 updateRecordingConfig={updateRecordingConfig}
+                saveRecordingConfig={saveRecordingConfig}
+                recordingConfigSaving={recordingConfigSaving}
+                recordingConfigDirty={recordingConfigDirty}
+                recordingConfigError={recordingConfigError}
                 modelLoading={modelLoading}
                 selectableAsrModels={selectableAsrModels}
                 asrModelGroups={asrModelGroups}
@@ -283,6 +291,10 @@ function RecordingSettingsPanel({
   micDevices,
   recordingAsrModelValue,
   updateRecordingConfig,
+  saveRecordingConfig,
+  recordingConfigSaving,
+  recordingConfigDirty,
+  recordingConfigError,
   modelLoading,
   selectableAsrModels,
   asrModelGroups,
@@ -293,14 +305,20 @@ function RecordingSettingsPanel({
 }) {
   const { t } = useI18n();
   return (
-    <section className="settings-panel">
+    <form className="settings-panel" onSubmit={saveRecordingConfig}>
       <div className="settings-section-head">
         <div>
           <h3>{t("全局录制设置")}</h3>
           <p>{missingRecordingModels.length ? t("当前设置缺少本地模型。") : t("当前录制配置已就绪。")}</p>
         </div>
-        <span className={`save-state ${missingRecordingModels.length ? "dirty" : ""}`}>
-          {missingRecordingModels.length ? t("需下载") : t("就绪")}
+        <span className={`save-state ${missingRecordingModels.length || recordingConfigDirty ? "dirty" : ""}`}>
+          {recordingConfigSaving
+            ? t("保存中")
+            : recordingConfigDirty
+              ? t("未保存")
+              : missingRecordingModels.length
+                ? t("需下载")
+                : t("已保存")}
         </span>
       </div>
 
@@ -327,18 +345,16 @@ function RecordingSettingsPanel({
             className="select-input compact-select"
             value={recordingAsrModelValue}
             onChange={(event) => updateRecordingConfig("asrModel", event.target.value)}
-            disabled={recording || modelLoading || selectableAsrModels.length === 0}
+            disabled={recording || modelLoading}
           >
-            {selectableAsrModels.length === 0 && (
-              <option value="">{t("请先下载模型")}</option>
-            )}
             {asrModelGroups.map((group) => (
               <optgroup key={group.label} label={t(group.label)}>
                 {group.models.map((model) => {
                   const meta = modelCatalogByKey.get(`asr:${model}`);
+                  const installed = Boolean(meta?.installed || selectableAsrModels.includes(model));
                   return (
-                    <option key={model} value={model}>
-                      {t(meta?.label || asrModelName(model))}
+                    <option className={installed ? "" : "missing-option"} disabled={!installed} key={model} value={model}>
+                      {t(meta?.label || asrModelName(model))}{installed ? "" : ` · ${t("未安装")}`}
                     </option>
                   );
                 })}
@@ -400,11 +416,14 @@ function RecordingSettingsPanel({
         </label>
       </div>
 
+      {recordingConfigError && <div className="error-line llm-error">{recordingConfigError}</div>}
+
       {missingRecordingModels.length > 0 && (
         <div className="config-actions">
           <button
+            type="button"
             className="mini-button text-mini"
-            onClick={() => ensureRecordingModels()}
+            onClick={() => ensureRecordingModels(recordingConfig)}
             disabled={Boolean(activeModelDownload)}
             title={t("下载当前录制配置需要的模型")}
           >
@@ -413,7 +432,19 @@ function RecordingSettingsPanel({
           </button>
         </div>
       )}
-    </section>
+
+      <div className="confirm-actions">
+        <button
+          type="submit"
+          className="confirm-save"
+          disabled={recording || recordingConfigSaving || missingRecordingModels.length > 0}
+          title={missingRecordingModels.length ? t("请先下载模型") : t("保存")}
+        >
+          <Check size={14} />
+          <span>{recordingConfigSaving ? t("保存中") : t("保存")}</span>
+        </button>
+      </div>
+    </form>
   );
 }
 

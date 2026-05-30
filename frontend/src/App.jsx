@@ -286,6 +286,23 @@ function asrBackendLabel(value) {
   return value || "识别模型";
 }
 
+function asrBackendForModel(model) {
+  const name = String(model || "");
+  if (name.startsWith("mlx-")) return "mlx";
+  if (name.startsWith("funasr-")) return "funasr";
+  return "faster-whisper";
+}
+
+function recordingConfigsEqual(left, right) {
+  const a = clampRecordingConfig(left);
+  const b = clampRecordingConfig(right);
+  return a.language === b.language
+    && a.asrModel === b.asrModel
+    && a.speakerMode === b.speakerMode
+    && a.maxSegmentMs === b.maxSegmentMs
+    && a.inputGain === b.inputGain;
+}
+
 function meetingStatusName(statusValue) {
   const labels = {
     recording: "录音中",
@@ -757,6 +774,9 @@ function App() {
   const [modelCatalog, setModelCatalog] = useState(null);
   const [recordingAsrOptions, setRecordingAsrOptions] = useState([]);
   const [recordingConfig, setRecordingConfig] = useState(loadRecordingConfig);
+  const [recordingConfigDraft, setRecordingConfigDraft] = useState(loadRecordingConfig);
+  const [recordingConfigSaving, setRecordingConfigSaving] = useState(false);
+  const [recordingConfigError, setRecordingConfigError] = useState("");
   const [pipelineStatus, setPipelineStatus] = useState("待机");
   const [llmStatus, setLlmStatus] = useState({ provider: "VibeAround", transport: "local-api" });
   const [llmConfig, setLlmConfig] = useState(DEFAULT_LLM_CONFIG);
@@ -775,6 +795,7 @@ function App() {
   const [propertiesError, setPropertiesError] = useState("");
   const [micDevices, setMicDevices] = useState([]);
   const [selectedMicId, setSelectedMicId] = useState(loadSelectedMicId);
+  const [selectedMicDraftId, setSelectedMicDraftId] = useState(loadSelectedMicId);
   const [activeMicLabel, setActiveMicLabel] = useState("");
   const [vadLevel, setVadLevel] = useState(0);
   const [liveWaveformBars, setLiveWaveformBars] = useState([]);
@@ -901,17 +922,16 @@ function App() {
         label: item.label || asrModelName(name),
         backend: item.backend || (name.startsWith("mlx-") ? "mlx" : name.startsWith("funasr-") ? "funasr" : "faster-whisper"),
         backend_label: item.backend_label || asrBackendLabel(item.backend),
-        installed: true,
+        installed: Boolean(item.installed),
       });
     }
     return map;
   }, [recordingAsrOptions]);
   const selectableAsrModels = useMemo(() => {
-    const configuredNames = [...recordingAsrMetaByName.keys()];
-    if (configuredNames.length > 0) {
-      return ASR_MODEL_ORDER.filter((name) => configuredNames.includes(name));
-    }
-    return ASR_MODEL_ORDER;
+    const installedNames = [...recordingAsrMetaByName.values()]
+      .filter((item) => item.installed)
+      .map((item) => item.name || item.id);
+    return ASR_MODEL_ORDER.filter((name) => installedNames.includes(name));
   }, [recordingAsrMetaByName]);
   const modelCatalogByKey = useMemo(() => {
     const map = new Map();
@@ -929,7 +949,10 @@ function App() {
   const asrModelGroups = useMemo(() => {
     const groups = [];
     for (const backend of ["faster-whisper", "mlx", "funasr"]) {
-      const models = selectableAsrModels.filter((name) => modelCatalogByKey.get(`asr:${name}`)?.backend === backend);
+      const models = ASR_MODEL_ORDER.filter((name) => {
+        const meta = modelCatalogByKey.get(`asr:${name}`);
+        return (meta?.backend || asrBackendForModel(name)) === backend;
+      });
       if (models.length > 0) {
         groups.push({
           label: asrBackendLabel(backend),
@@ -938,12 +961,12 @@ function App() {
       }
     }
     const grouped = new Set(groups.flatMap((group) => group.models));
-    const remaining = selectableAsrModels.filter((name) => !grouped.has(name));
+    const remaining = ASR_MODEL_ORDER.filter((name) => !grouped.has(name));
     if (remaining.length > 0) {
       groups.push({ label: "其他模型", models: remaining });
     }
     return groups;
-  }, [modelCatalogByKey, selectableAsrModels]);
+  }, [modelCatalogByKey]);
   const modelCatalogAsrGroups = useMemo(() => {
     const groups = [];
     for (const backend of ["faster-whisper", "mlx", "funasr"]) {
@@ -1086,11 +1109,14 @@ function App() {
     const wasOpen = previousSettingsOpenRef.current;
     previousSettingsOpenRef.current = settingsOpen;
     if (!settingsOpen || wasOpen) return;
+    setRecordingConfigDraft(clampRecordingConfig(recordingConfigRef.current));
+    setSelectedMicDraftId(selectedMicId);
+    setRecordingConfigError("");
     setLlmConfigDraft(llmDraftFromConfig(llmConfig));
     setLlmConfigError("");
     setPromptConfigError("");
     if (promptConfig) setPromptDrafts(promptDraftsFromConfig(promptConfig));
-  }, [llmConfig, promptConfig, settingsOpen]);
+  }, [llmConfig, promptConfig, selectedMicId, settingsOpen]);
 
   const applyLlmStatus = useCallback((data) => {
     if (!data) {
@@ -1121,6 +1147,9 @@ function App() {
       recordingConfigRef.current = nextConfig;
       setRecordingConfig(nextConfig);
       setAsrLanguage(nextConfig.language);
+      if (!settingsOpen) {
+        setRecordingConfigDraft(nextConfig);
+      }
     }
     if (Array.isArray(data.asr_options)) setRecordingAsrOptions(data.asr_options);
     setModelStatus(data.asr || null);
@@ -1134,7 +1163,7 @@ function App() {
       }));
     }
     if (data.load_error) setError(userFriendlyError(data.load_error));
-  }, [applyLlmStatus]);
+  }, [applyLlmStatus, settingsOpen]);
 
   const refreshPromptConfig = useCallback(async () => {
     try {
@@ -1344,12 +1373,19 @@ function App() {
     }
   }, [modelCatalogByKey]);
 
-  const updateRecordingConfig = useCallback((field, value) => {
+  const updateRecordingConfigDraft = useCallback((field, value) => {
+    setRecordingConfigError("");
+    setRecordingConfigDraft((current) => clampRecordingConfig({ ...current, [field]: value }));
+  }, []);
+
+  const saveRecordingConfig = useCallback(async (event) => {
+    event.preventDefault();
+    if (recordingConfigSaving || recording) return;
     const current = clampRecordingConfig(recordingConfigRef.current);
-    const next = clampRecordingConfig({ ...current, [field]: value });
+    const next = clampRecordingConfig(recordingConfigDraft);
     const modelChanged = next.asrModel !== current.asrModel;
-    recordingConfigRef.current = next;
-    setRecordingConfig(next);
+    setRecordingConfigSaving(true);
+    setRecordingConfigError("");
     setError("");
     if (modelChanged) {
       setModelLoadState({
@@ -1360,41 +1396,54 @@ function App() {
         previousLabel: asrModelName(current.asrModel),
       });
     }
-    api("/api/recording-config", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(recordingConfigToServer(next)),
-    })
-      .then((data) => {
-        applyRecordingConfigStatus(data);
-        if (modelChanged) {
-          setModelLoadState({
-            status: "success",
-            source: "settings",
-            targetModel: next.asrModel,
-            targetLabel: asrModelName(next.asrModel),
-            previousLabel: asrModelName(current.asrModel),
-          });
-        }
-      })
-      .catch((err) => {
-        if (!modelChanged) {
-          setRecordingConfig(current);
-          recordingConfigRef.current = current;
-        }
-        setError(userFriendlyError(err.message));
-        if (modelChanged) {
-          setModelLoadState({
-            status: "error",
-            source: "settings",
-            targetModel: next.asrModel,
-            targetLabel: asrModelName(next.asrModel),
-            previousLabel: asrModelName(current.asrModel),
-            error: userFriendlyError(err.message),
-          });
-        }
+    try {
+      if (selectedMicDraftId !== selectedMicId) {
+        selectMicDevice(selectedMicDraftId);
+      }
+      const data = await api("/api/recording-config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(recordingConfigToServer(next)),
       });
-  }, [applyRecordingConfigStatus]);
+      applyRecordingConfigStatus(data);
+      const saved = data.config ? recordingConfigFromServer(data.config) : next;
+      setRecordingConfigDraft(saved);
+      setPipelineStatus("录制配置已保存");
+      if (modelChanged) {
+        setModelLoadState({
+          status: "success",
+          source: "settings",
+          targetModel: next.asrModel,
+          targetLabel: asrModelName(next.asrModel),
+          previousLabel: asrModelName(current.asrModel),
+        });
+      }
+    } catch (err) {
+      const message = userFriendlyError(err.message);
+      setRecordingConfigError(message);
+      setError(message);
+      if (modelChanged) {
+        setModelLoadState({
+          status: "error",
+          source: "settings",
+          targetModel: next.asrModel,
+          targetLabel: asrModelName(next.asrModel),
+          previousLabel: asrModelName(current.asrModel),
+          error: message,
+        });
+      }
+    } finally {
+      setRecordingConfigSaving(false);
+    }
+  }, [
+    applyRecordingConfigStatus,
+    recording,
+    recordingConfigDraft,
+    recordingConfigSaving,
+    selectMicDevice,
+    selectedMicDraftId,
+    selectedMicId,
+  ]);
 
   const updateAppearance = useCallback((field, value) => {
     setAppearance((current) => clampAppearance({ ...current, [field]: value }));
@@ -1503,16 +1552,16 @@ function App() {
   }, []);
 
   const missingModelsForConfig = useCallback((config) => (
-    modelCatalog
+    (modelCatalog || recordingAsrMetaByName.size > 0)
       ? requiredModelsForConfig(config).filter((item) => {
         const meta = modelCatalogByKey.get(`${item.kind}:${item.model}`);
         return !meta?.installed;
       })
       : []
-  ), [modelCatalog, modelCatalogByKey, requiredModelsForConfig]);
+  ), [modelCatalog, modelCatalogByKey, recordingAsrMetaByName.size, requiredModelsForConfig]);
 
-  const ensureRecordingModels = useCallback(async () => {
-    const missing = missingModelsForConfig(recordingConfigRef.current);
+  const ensureRecordingModels = useCallback(async (config = recordingConfigRef.current) => {
+    const missing = missingModelsForConfig(config);
     if (missing.length === 0) return true;
     const names = missing.map((item) => {
       const meta = modelCatalogByKey.get(`${item.kind}:${item.model}`);
@@ -2742,7 +2791,10 @@ function App() {
   const downloadNotes = useCallback(() => downloadMeetingFile("notes"), [downloadMeetingFile]);
 
   const micLevel = Math.min(1, Math.max(0.08, vadLevel * 18));
-  const missingRecordingModels = missingModelsForConfig(recordingConfig);
+  const normalizedRecordingConfigDraft = clampRecordingConfig(recordingConfigDraft);
+  const recordingConfigDirty = !recordingConfigsEqual(recordingConfig, recordingConfigDraft)
+    || selectedMicDraftId !== selectedMicId;
+  const missingRecordingModels = missingModelsForConfig(recordingConfigDraft);
   const maxSegmentSeconds = Math.round(normalizedRecordingConfig.maxSegmentMs / 1000);
   const selectedMicDeviceIndex = micDevices.findIndex((device) => device.deviceId === selectedMicId);
   const selectedMicLabel = selectedMicDeviceIndex >= 0
@@ -2752,9 +2804,7 @@ function App() {
       : "系统默认麦克风";
   const currentMicLabel = activeMicLabel || selectedMicLabel;
   const currentInputGainLabel = inputGainName(normalizedRecordingConfig.inputGain);
-  const recordingAsrModelValue = selectableAsrModels.includes(recordingConfig.asrModel)
-    ? recordingConfig.asrModel
-    : "";
+  const recordingAsrModelValue = normalizedRecordingConfigDraft.asrModel;
   const currentRecordingSummary = [
     selectedAsrModelMeta?.label || asrModelName(normalizedRecordingConfig.asrModel),
     languageName(normalizedRecordingConfig.language),
@@ -2939,17 +2989,21 @@ function App() {
         settingsTab={settingsTab}
         setSettingsTab={setSettingsTab}
         missingRecordingModels={missingRecordingModels}
-        selectedMicId={selectedMicId}
-        selectMicDevice={selectMicDevice}
+        selectedMicId={selectedMicDraftId}
+        selectMicDevice={setSelectedMicDraftId}
         recording={recording}
         micDevices={micDevices}
         recordingAsrModelValue={recordingAsrModelValue}
-        updateRecordingConfig={updateRecordingConfig}
-        modelLoading={modelLoadState?.status === "loading"}
+        updateRecordingConfig={updateRecordingConfigDraft}
+        saveRecordingConfig={saveRecordingConfig}
+        recordingConfigSaving={recordingConfigSaving}
+        recordingConfigDirty={recordingConfigDirty}
+        recordingConfigError={recordingConfigError}
+        modelLoading={modelLoadState?.status === "loading" || recordingConfigSaving}
         selectableAsrModels={selectableAsrModels}
         asrModelGroups={asrModelGroups}
         modelCatalogByKey={modelCatalogByKey}
-        recordingConfig={recordingConfig}
+        recordingConfig={recordingConfigDraft}
         ensureRecordingModels={ensureRecordingModels}
         activeModelDownload={activeModelDownload}
         saveLlmConfig={saveLlmConfig}
