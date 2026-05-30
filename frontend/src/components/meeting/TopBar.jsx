@@ -105,7 +105,9 @@ export function TopBar({
         <div className="status-strip">
           <span className={`pill ${servicePillClass}`}>{t("本地服务")} · {t(serviceCompactText(status.backend))}</span>
           {asrPillText && <span className={`pill ${asrPillClass}`}>{asrPillText}</span>}
-          <span className={`pill ${status.vibe}`}>{compactStatusText(assistantStatusText(llmStatus)).replace(/^接口\s*·\s*/u, "接口 ")}</span>
+          <span className={`pill ${status.vibe}`}>
+            {compactStatusText(assistantStatusText(llmStatus)).replace(/^LLM 模型接口\s*·\s*/u, "LLM 模型接口 ")}
+          </span>
           {asrWorking && <span className="pill working pulse-pill">{runtimeLine(runtimeStatus, pendingChunks, t)}</span>}
           {activeModelDownload && (
             <span className="pill working">

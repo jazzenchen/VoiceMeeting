@@ -194,6 +194,7 @@ const EN = {
   "保存": "Save",
   "当前：{value}": "Current: {value}",
   "接口": "API",
+  "LLM 模型接口": "LLM API",
   "本机通道": "Local channel",
   "仅支持 OpenAI Chat Completions 兼容接口，请填写可访问 /v1/chat/completions 的 BaseURL。": "Only OpenAI Chat Completions-compatible APIs are supported. Use a BaseURL that can reach /v1/chat/completions.",
   "系统提示词会影响 ASR 上下文、文字校对、纪要生成和问答。": "System prompts affect ASR context, proofreading, notes, and Q&A.",

@@ -448,7 +448,7 @@ function LlmSettingsPanel({
             disabled={llmConfigSaving}
           />
           <span>
-            <strong>{t("接口")}</strong>
+            <strong>{t("LLM 模型接口")}</strong>
             <small>OpenAI Chat Completions</small>
           </span>
         </label>

@@ -318,7 +318,7 @@ function assistantRouteText(llm) {
   if (!llm?.transport && !llm?.route && !llm?.provider) return "待连接";
   const route = String(llm?.route || llm?.transport || llm?.provider || "");
   if (llm?.provider === "openai-chat" || route.includes("openai-chat")) {
-    return llm?.model ? `接口 · ${llm.model}` : "接口";
+    return llm?.model ? `LLM 模型接口 · ${llm.model}` : "LLM 模型接口";
   }
   if (route.includes("web-chat")) return "Codex 通道";
   return "VibeAround";
@@ -358,7 +358,7 @@ function promptDraftsFromConfig(value) {
 }
 
 function llmProviderLabel(value) {
-  if (value === "openai-chat") return "接口";
+  if (value === "openai-chat") return "LLM 模型接口";
   return "VibeAround";
 }
 
@@ -1100,7 +1100,7 @@ function App() {
     if (data.config) {
       setLlmConfig(normalizeLlmConfig(data.config));
     }
-    const provider = data.provider === "openai-chat" ? "接口" : "VibeAround";
+    const provider = data.provider === "openai-chat" ? "LLM 模型接口" : "VibeAround";
     setLlmStatus({
       provider: data.provider_label || data.profile_id || provider,
       transport: data.route || data.transport || data.target_api_type || data.provider || "local-api",
