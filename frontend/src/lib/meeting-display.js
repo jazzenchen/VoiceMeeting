@@ -177,6 +177,20 @@ export function asrModelName(model) {
   return names[model] || model;
 }
 
+export function asrBackendLabel(value) {
+  if (value === "mlx") return "Mac MLX 模型";
+  if (value === "funasr") return "FunASR 模型";
+  if (value === "faster-whisper") return "通用模型";
+  return value || "识别模型";
+}
+
+export function asrBackendForModel(model) {
+  const name = String(model || "");
+  if (name.startsWith("mlx-")) return "mlx";
+  if (name.startsWith("funasr-")) return "funasr";
+  return "faster-whisper";
+}
+
 export function meetingStatusName(statusValue) {
   const labels = {
     recording: "录音中",
