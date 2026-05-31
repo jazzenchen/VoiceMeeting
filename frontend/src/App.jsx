@@ -27,12 +27,19 @@ import { I18nProvider, loadLocale, saveLocale } from "@/lib/i18n";
 import { api, apiUrl, fetchTextFile, readSse, wsUrl } from "@/lib/api-client";
 import { userFriendlyError } from "@/lib/error-messages";
 import {
+  DEFAULT_LLM_CONFIG,
+  llmDraftFromConfig,
+  normalizeLlmConfig,
+  promptDraftsFromConfig,
+} from "@/lib/llm-config";
+import {
   findPlaybackChunkIndex,
   notesOnlyMarkdown,
   pipelineStepIndex,
   playbackBounds,
   titleFromAudioFile,
 } from "@/lib/meeting-state";
+import { loadSelectedMicId, saveSelectedMicId } from "@/lib/mic-preferences";
 import { requestNativeMicrophonePermission, safeDownloadName, saveTextFile } from "@/lib/platform-files";
 import {
   LIVE_WAVEFORM_BAR_COUNT,
@@ -55,63 +62,6 @@ import {
   recordingConfigToServer,
   recordingConfigsEqual,
 } from "@/lib/recording-config";
-
-const MIC_DEVICE_STORAGE_KEY = "voice-meeting-mic-device";
-const DEFAULT_LLM_CONFIG = {
-  provider: "vibearound",
-  openai_chat: {
-    base_url: "",
-    model: "",
-    has_api_key: false,
-  },
-};
-
-function loadSelectedMicId() {
-  try {
-    return window.localStorage.getItem(MIC_DEVICE_STORAGE_KEY) || "";
-  } catch {
-    return "";
-  }
-}
-
-function saveSelectedMicId(value) {
-  try {
-    if (value) {
-      window.localStorage.setItem(MIC_DEVICE_STORAGE_KEY, value);
-    } else {
-      window.localStorage.removeItem(MIC_DEVICE_STORAGE_KEY);
-    }
-  } catch {
-    // Local persistence is best-effort.
-  }
-}
-
-function normalizeLlmConfig(value) {
-  const openaiChat = value?.openai_chat || {};
-  return {
-    provider: value?.provider === "openai-chat" ? "openai-chat" : "vibearound",
-    openai_chat: {
-      base_url: String(openaiChat.base_url || ""),
-      model: String(openaiChat.model || ""),
-      has_api_key: Boolean(openaiChat.has_api_key),
-    },
-  };
-}
-
-function llmDraftFromConfig(value) {
-  const config = normalizeLlmConfig(value);
-  return {
-    provider: config.provider,
-    baseUrl: config.openai_chat.base_url,
-    apiKey: "",
-    model: config.openai_chat.model,
-  };
-}
-
-function promptDraftsFromConfig(value) {
-  const prompts = Array.isArray(value?.prompts) ? value.prompts : [];
-  return Object.fromEntries(prompts.map((item) => [item.key, item.value || item.default || ""]));
-}
 
 function App() {
   const [meeting, setMeeting] = useState(null);
