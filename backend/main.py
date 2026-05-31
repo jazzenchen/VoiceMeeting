@@ -3,9 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import mimetypes
-import os
-import shutil
-import threading
 import time
 import uuid
 from collections import defaultdict
@@ -34,7 +31,6 @@ from .api.schemas import (
 from .asr import ASRUnavailable
 from .asr_runtime import ASRRuntime
 from .config import (
-    ALLOW_MODEL_DOWNLOAD,
     ASR_MODEL,
     ASR_MODEL_DIR,
     PROJECT_DIR,
@@ -46,7 +42,6 @@ from .model_registry import (
     ASR_MODEL_CATALOG,
     FUNASR_MODEL_CATALOG,
     FUNASR_MODEL_DIR,
-    FUNASR_MODEL_MARKER_DIR,
     MAC_MLX_ENABLED,
     MLX_ASR_MODEL_CATALOG,
     MLX_ASR_MODEL_DIR,
@@ -55,17 +50,13 @@ from .model_registry import (
     PYANNOTE_COMMUNITY_REPO_ID,
     PYANNOTE_MODEL_DIR,
     SUPPORTED_ASR_MODELS,
-    asr_model_backend,
-    asr_model_cache_dir,
     asr_model_cache_path,
-    asr_model_cache_paths,
     asr_model_repos,
     directory_size_bytes,
     discovered_asr_models,
-    funasr_model_marker_path,
     local_pyannote_model_path,
-    mark_funasr_model_installed,
 )
+from .model_downloads import ModelDownloadManager
 from .prompt_settings import PromptConfigStore
 from .recording_config import RecordingConfigStore
 from .speaker_tracker import SpeakerTracker, SpeakerTrackingUnavailable
@@ -111,6 +102,7 @@ app.add_middleware(
 store = MeetingStore()
 store.mark_interrupted_chunks(error="服务重启时识别被中断，请重新识别这段音频。")
 asr_runtime = ASRRuntime()
+model_downloads = ModelDownloadManager(asr_runtime.engine_for_model)
 diarizer = PyannoteDiarizer()
 local_pyannote_diarizer: Optional[PyannoteDiarizer] = None
 speaker_tracker = SpeakerTracker()
@@ -123,7 +115,6 @@ summary_lock = asyncio.Lock()
 summary_states: Dict[str, Dict[str, Any]] = {}
 reprocess_states: Dict[str, Dict[str, Any]] = {}
 REALTIME_SUMMARY_ENABLED = False
-model_download_states: Dict[str, Dict[str, Any]] = {}
 recording_model_load_error = ""
 llm_status_cache: Dict[str, Any] = {"updated_at": 0.0, "value": {}}
 llm_status_lock = asyncio.Lock()
@@ -162,26 +153,6 @@ def diarizer_for_mode(mode: str) -> Optional[PyannoteDiarizer]:
     return None
 
 
-def hf_token_available() -> bool:
-    return bool(
-        os.environ.get("VOICE_MEETING_HF_TOKEN")
-        or os.environ.get("HUGGINGFACE_TOKEN")
-        or os.environ.get("HF_TOKEN")
-    )
-
-
-def read_hf_token() -> Optional[str]:
-    return (
-        os.environ.get("VOICE_MEETING_HF_TOKEN")
-        or os.environ.get("HUGGINGFACE_TOKEN")
-        or os.environ.get("HF_TOKEN")
-    )
-
-
-def local_asr_models() -> list[str]:
-    return sorted(discovered_asr_models())
-
-
 def normalize_asr_model(value: Optional[str]) -> str:
     model_name = (value or ASR_MODEL).strip()
     if model_name not in SUPPORTED_ASR_MODELS:
@@ -194,38 +165,6 @@ def resolve_asr_model(value: Optional[str]) -> str:
     if model_name not in discovered_asr_models():
         raise HTTPException(status_code=400, detail="本地还没有这套识别资源，请选择已有的识别方式。")
     return model_name
-
-
-def model_job_key(kind: str, model: str) -> str:
-    return f"{kind}:{model}"
-
-
-def set_model_download_state(job_id: str, **fields: Any) -> Dict[str, Any]:
-    current = dict(model_download_states.get(job_id) or {})
-    current.update(fields)
-    current["updated_at"] = now_iso()
-    model_download_states[job_id] = current
-    return current
-
-
-def active_model_job(kind: str, model: str) -> Optional[Dict[str, Any]]:
-    key = model_job_key(kind, model)
-    jobs = [
-        state
-        for state in model_download_states.values()
-        if state.get("key") == key and state.get("status") in {"queued", "running"}
-    ]
-    if not jobs:
-        return None
-    return sorted(jobs, key=lambda item: str(item.get("updated_at") or ""))[-1]
-
-
-def latest_model_job(kind: str, model: str) -> Optional[Dict[str, Any]]:
-    key = model_job_key(kind, model)
-    jobs = [state for state in model_download_states.values() if state.get("key") == key]
-    if not jobs:
-        return None
-    return sorted(jobs, key=lambda item: str(item.get("updated_at") or ""))[-1]
 
 
 def model_catalog() -> Dict[str, Any]:
@@ -260,7 +199,7 @@ def model_catalog() -> Dict[str, Any]:
                     "current": name == ASR_MODEL,
                     "loaded": runtime_flags["loaded"],
                     "loading": runtime_flags["loading"],
-                    "job": latest_model_job("asr", name),
+                    "job": model_downloads.latest_job("asr", name),
                     "backend": backend,
                     "backend_label": backend_label,
                     "base_model": meta.get("base_model") or name,
@@ -294,21 +233,17 @@ def model_catalog() -> Dict[str, Any]:
                     "path": str(PYANNOTE_MODEL_DIR),
                     "size_bytes": directory_size_bytes(PYANNOTE_MODEL_DIR) if pyannote_installed else 0,
                     "requires_token": True,
-                    "token_available": hf_token_available(),
+                    "token_available": model_downloads.hf_token_available(),
                     "enabled": diarizer.enabled,
                     "available": diarizer.status().get("available") or (
                         pyannote_installed and not diarizer.enabled
                     ),
-                    "job": latest_model_job("diarization", PYANNOTE_COMMUNITY_MODEL_ID),
+                    "job": model_downloads.latest_job("diarization", PYANNOTE_COMMUNITY_MODEL_ID),
                 }
             ],
             "runtime": diarizer.status(),
         },
-        "downloads": sorted(
-            model_download_states.values(),
-            key=lambda item: str(item.get("updated_at") or ""),
-            reverse=True,
-        )[:24],
+        "downloads": model_downloads.recent_states(),
     }
 
 
@@ -334,353 +269,6 @@ def asr_model_options() -> list[Dict[str, Any]]:
                 }
             )
     return options
-
-
-def _friendly_model_error(exc: Exception, kind: str = "") -> str:
-    text = str(exc)
-    lowered = text.lower()
-    if kind == "asr" and (
-        "repository not found" in lowered
-        or "401" in text
-        or "403" in text
-        or "gated" in lowered
-        or "token" in lowered
-    ):
-        return "ASR 模型下载失败，可能是下载源不可用或网络访问被拦截。请刷新模型列表后重试。"
-    if "401" in text or "403" in text or "gated" in lowered or "token" in lowered:
-        return "模型需要授权。请先配置 VOICE_MEETING_HF_TOKEN/HF_TOKEN，并确认已接受模型条款。"
-    if "connection" in lowered or "timeout" in lowered or "network" in lowered:
-        return "联网下载失败，请检查网络后重试。"
-    return text or type(exc).__name__
-
-
-def model_download_cancel_requested(job_id: str) -> bool:
-    return bool(model_download_states.get(job_id, {}).get("cancel_requested"))
-
-
-def raise_if_model_download_cancelled(job_id: str) -> None:
-    if model_download_cancel_requested(job_id):
-        raise ModelDownloadCancelled("model download cancelled")
-
-
-def cleanup_model_files(kind: str, model: str) -> None:
-    paths: list[Path] = []
-    lock_paths: list[Path] = []
-    if kind == "asr":
-        if asr_model_backend(model) == "funasr":
-            marker = funasr_model_marker_path(model)
-            try:
-                marker.unlink()
-            except FileNotFoundError:
-                pass
-            except Exception:
-                pass
-            remaining = [
-                path
-                for path in FUNASR_MODEL_MARKER_DIR.glob("*.json")
-                if path.is_file()
-            ] if FUNASR_MODEL_MARKER_DIR.exists() else []
-            if not remaining:
-                paths = [FUNASR_MODEL_DIR]
-        else:
-            paths = asr_model_cache_paths(model)
-            cache_dir = asr_model_cache_dir(model)
-            lock_paths = [cache_dir / ".locks" / path.name for path in paths]
-    elif kind == "diarization" and model == PYANNOTE_COMMUNITY_MODEL_ID:
-        paths = [PYANNOTE_MODEL_DIR]
-
-    for path in paths + lock_paths:
-        try:
-            if path.exists():
-                shutil.rmtree(path)
-        except Exception:
-            continue
-
-
-def _download_hf_repo_files(
-    job_id: str,
-    repo_id: str,
-    *,
-    cache_dir: Optional[Path] = None,
-    local_dir: Optional[Path] = None,
-    token: Optional[str] = None,
-) -> None:
-    from huggingface_hub import HfApi, hf_hub_download, snapshot_download
-    from tqdm.auto import tqdm
-
-    class CancelAwareTqdm(tqdm):
-        current_file = ""
-        file_index = 0
-        total_files = 1
-        base_downloaded_bytes = 0
-        total_repo_bytes = 0
-        last_emit_at = 0.0
-
-        @classmethod
-        def configure(
-            cls,
-            *,
-            filename: str = "",
-            file_index: int = 0,
-            total_files: int = 1,
-            base_downloaded_bytes: int = 0,
-            total_repo_bytes: int = 0,
-        ) -> None:
-            cls.current_file = filename
-            cls.file_index = file_index
-            cls.total_files = max(1, total_files)
-            cls.base_downloaded_bytes = max(0, base_downloaded_bytes)
-            cls.total_repo_bytes = max(0, total_repo_bytes)
-            cls.last_emit_at = 0.0
-
-        def update(self, n: int = 1):
-            raise_if_model_download_cancelled(job_id)
-            result = super().update(n)
-            total_repo_bytes = type(self).total_repo_bytes
-            if total_repo_bytes <= 0:
-                return result
-
-            now = time.monotonic()
-            current_file_bytes = max(0, int(getattr(self, "n", 0) or 0))
-            downloaded = min(
-                total_repo_bytes,
-                type(self).base_downloaded_bytes + current_file_bytes,
-            )
-            if now - type(self).last_emit_at >= 0.25 or downloaded >= total_repo_bytes:
-                type(self).last_emit_at = now
-                set_model_download_state(
-                    job_id,
-                    stage=f"下载 {type(self).file_index}/{type(self).total_files}",
-                    progress=min(0.98, downloaded / total_repo_bytes),
-                    file=type(self).current_file,
-                    downloaded_bytes=downloaded,
-                    total_bytes=total_repo_bytes,
-                )
-            return result
-
-    def current_incomplete_bytes() -> int:
-        if cache_dir is None:
-            return 0
-        blobs_dir = Path(cache_dir) / f"models--{repo_id.replace('/', '--')}" / "blobs"
-        if not blobs_dir.exists():
-            return 0
-        sizes: list[int] = []
-        for path in blobs_dir.glob("*.incomplete"):
-            try:
-                sizes.append(path.stat().st_size)
-            except OSError:
-                continue
-        return max(sizes, default=0)
-
-    def start_cache_progress_poll(
-        *,
-        filename: str,
-        file_index: int,
-        total_files: int,
-        base_downloaded_bytes: int,
-        total_repo_bytes: int,
-    ) -> tuple[threading.Event, Optional[threading.Thread]]:
-        stop_event = threading.Event()
-        if cache_dir is None or total_repo_bytes <= 0:
-            return stop_event, None
-
-        def poll() -> None:
-            last_downloaded = -1
-            while not stop_event.wait(0.35):
-                if model_download_cancel_requested(job_id):
-                    return
-                current_file_bytes = current_incomplete_bytes()
-                downloaded = min(
-                    total_repo_bytes,
-                    max(0, base_downloaded_bytes) + max(0, current_file_bytes),
-                )
-                if downloaded <= last_downloaded:
-                    continue
-                last_downloaded = downloaded
-                set_model_download_state(
-                    job_id,
-                    stage=f"下载 {file_index}/{total_files}",
-                    progress=min(0.98, downloaded / total_repo_bytes),
-                    file=filename,
-                    downloaded_bytes=downloaded,
-                    total_bytes=total_repo_bytes,
-                )
-
-        thread = threading.Thread(target=poll, daemon=True)
-        thread.start()
-        return stop_event, thread
-
-    raise_if_model_download_cancelled(job_id)
-    try:
-        api = HfApi()
-        info = api.model_info(repo_id, files_metadata=True, token=token)
-        siblings = [
-            sibling
-            for sibling in (getattr(info, "siblings", None) or [])
-            if getattr(sibling, "rfilename", None)
-        ]
-    except Exception:
-        siblings = []
-
-    if not siblings:
-        set_model_download_state(job_id, stage="下载模型文件", progress=0.1)
-        raise_if_model_download_cancelled(job_id)
-        kwargs: Dict[str, Any] = {"repo_id": repo_id, "token": token}
-        if cache_dir is not None:
-            kwargs["cache_dir"] = str(cache_dir)
-        if local_dir is not None:
-            local_dir.mkdir(parents=True, exist_ok=True)
-            kwargs["local_dir"] = str(local_dir)
-        CancelAwareTqdm.configure()
-        kwargs["tqdm_class"] = CancelAwareTqdm
-        snapshot_download(**kwargs)
-        raise_if_model_download_cancelled(job_id)
-        set_model_download_state(job_id, stage="整理模型文件", progress=0.95)
-        return
-
-    files = [
-        sibling
-        for sibling in siblings
-        if not str(getattr(sibling, "rfilename", "")).endswith("/")
-    ]
-    total_files = max(1, len(files))
-    total_bytes = sum(int(getattr(item, "size", 0) or 0) for item in files)
-    downloaded_bytes = 0
-    for index, item in enumerate(files, start=1):
-        raise_if_model_download_cancelled(job_id)
-        filename = str(getattr(item, "rfilename"))
-        size = int(getattr(item, "size", 0) or 0)
-        progress = (
-            min(0.98, downloaded_bytes / total_bytes)
-            if total_bytes > 0
-            else min(0.98, (index - 1) / total_files)
-        )
-        set_model_download_state(
-            job_id,
-            stage=f"下载 {index}/{total_files}",
-            progress=progress,
-            file=filename,
-            downloaded_bytes=downloaded_bytes,
-            total_bytes=total_bytes,
-        )
-        CancelAwareTqdm.configure(
-            filename=filename,
-            file_index=index,
-            total_files=total_files,
-            base_downloaded_bytes=downloaded_bytes,
-            total_repo_bytes=total_bytes,
-        )
-        kwargs = {
-            "repo_id": repo_id,
-            "filename": filename,
-            "token": token,
-        }
-        if cache_dir is not None:
-            kwargs["cache_dir"] = str(cache_dir)
-        if local_dir is not None:
-            local_dir.mkdir(parents=True, exist_ok=True)
-            kwargs["local_dir"] = str(local_dir)
-        kwargs["tqdm_class"] = CancelAwareTqdm
-        stop_event, poll_thread = start_cache_progress_poll(
-            filename=filename,
-            file_index=index,
-            total_files=total_files,
-            base_downloaded_bytes=downloaded_bytes,
-            total_repo_bytes=total_bytes,
-        )
-        try:
-            hf_hub_download(**kwargs)
-        finally:
-            stop_event.set()
-            if poll_thread is not None:
-                poll_thread.join(timeout=1.0)
-        raise_if_model_download_cancelled(job_id)
-        downloaded_bytes += size
-        set_model_download_state(
-            job_id,
-            stage=f"下载 {index}/{total_files}",
-            progress=(
-                min(0.98, downloaded_bytes / total_bytes)
-                if total_bytes > 0
-                else min(0.98, index / total_files)
-            ),
-            file=filename,
-            downloaded_bytes=downloaded_bytes,
-            total_bytes=total_bytes,
-        )
-
-
-async def download_model_job(job_id: str, kind: str, model: str) -> None:
-    set_model_download_state(job_id, status="running", stage="准备下载", progress=0.0)
-    try:
-        if kind == "asr":
-            if model not in SUPPORTED_ASR_MODELS:
-                raise ValueError("当前识别模型不可用。")
-            if asr_model_backend(model) == "funasr":
-                set_model_download_state(job_id, stage="加载 FunASR 模型", progress=0.2)
-                engine = asr_runtime.engine_for_model(model)
-                await asyncio.to_thread(engine.load)
-                mark_funasr_model_installed(model)
-                set_model_download_state(job_id, stage="整理模型文件", progress=0.95)
-                await asyncio.to_thread(engine.unload)
-                raise_if_model_download_cancelled(job_id)
-                set_model_download_state(
-                    job_id,
-                    status="done",
-                    stage="已安装",
-                    progress=1.0,
-                    error="",
-                    finished_at=now_iso(),
-                )
-                return
-            cache_dir = asr_model_cache_dir(model)
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            repo_id = asr_model_repos(model)[0]
-            set_model_download_state(job_id, repo_id=repo_id, stage="连接下载源")
-            await asyncio.to_thread(
-                _download_hf_repo_files,
-                job_id,
-                repo_id,
-                cache_dir=cache_dir,
-            )
-        elif kind == "diarization" and model == PYANNOTE_COMMUNITY_MODEL_ID:
-            await asyncio.to_thread(
-                _download_hf_repo_files,
-                job_id,
-                PYANNOTE_COMMUNITY_REPO_ID,
-                local_dir=PYANNOTE_MODEL_DIR,
-                token=read_hf_token(),
-            )
-        else:
-            raise ValueError("当前模型不可用。")
-        set_model_download_state(
-            job_id,
-            status="done",
-            stage="已安装",
-            progress=1.0,
-            error="",
-            finished_at=now_iso(),
-        )
-    except ModelDownloadCancelled:
-        cleanup_model_files(kind, model)
-        set_model_download_state(
-            job_id,
-            status="cancelled",
-            stage="已取消",
-            progress=0.0,
-            error="",
-            cancel_requested=True,
-            finished_at=now_iso(),
-        )
-    except Exception as exc:
-        set_model_download_state(
-            job_id,
-            status="error",
-            stage="下载失败",
-            progress=0.0,
-            error=_friendly_model_error(exc, kind),
-            finished_at=now_iso(),
-        )
 
 
 def parse_optional_ms(value: Optional[str]) -> Optional[int]:
@@ -886,10 +474,6 @@ async def ensure_summary_current(meeting_id: str) -> Dict[str, Any]:
     return store.get_meeting(meeting_id)
 
 
-class ModelDownloadCancelled(RuntimeError):
-    pass
-
-
 async def send_changed_json(websocket: WebSocket, payload: Dict[str, Any], previous: str) -> str:
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     if encoded != previous:
@@ -923,24 +507,13 @@ async def start_model_download(payload: ModelDownloadRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="当前识别模型不可用。")
     if kind == "diarization" and model != PYANNOTE_COMMUNITY_MODEL_ID:
         raise HTTPException(status_code=400, detail="当前说话人分离模型不可用。")
-    running = active_model_job(kind, model)
+    running = model_downloads.active_job(kind, model)
     if running:
         return {"job": running, "catalog": model_catalog()}
 
     job_id = uuid.uuid4().hex
-    state = set_model_download_state(
-        job_id,
-        id=job_id,
-        key=model_job_key(kind, model),
-        kind=kind,
-        model=model,
-        status="queued",
-        stage="queued",
-        progress=0.0,
-        error="",
-        created_at=now_iso(),
-    )
-    asyncio.create_task(download_model_job(job_id, kind, model))
+    state = model_downloads.create_job(job_id, kind, model)
+    asyncio.create_task(model_downloads.download_job(job_id, kind, model))
     return {"job": state, "catalog": model_catalog()}
 
 
@@ -948,16 +521,10 @@ async def start_model_download(payload: ModelDownloadRequest) -> Dict[str, Any]:
 async def delete_model(kind: str, model: str) -> Dict[str, Any]:
     clean_kind = clean_identifier(kind, "asr")
     clean_model = model.strip()
-    running = active_model_job(clean_kind, clean_model)
+    running = model_downloads.active_job(clean_kind, clean_model)
     if running:
-        set_model_download_state(
-            str(running["id"]),
-            status="cancelling",
-            stage="正在取消",
-            cancel_requested=True,
-            error="",
-        )
-        cleanup_model_files(clean_kind, clean_model)
+        model_downloads.request_cancel(str(running["id"]))
+        model_downloads.cleanup_model_files(clean_kind, clean_model)
         return model_catalog()
 
     if clean_kind == "asr":
@@ -972,7 +539,7 @@ async def delete_model(kind: str, model: str) -> Dict[str, Any]:
     else:
         raise HTTPException(status_code=400, detail="当前模型不可用。")
 
-    cleanup_model_files(clean_kind, clean_model)
+    model_downloads.cleanup_model_files(clean_kind, clean_model)
     return model_catalog()
 
 
