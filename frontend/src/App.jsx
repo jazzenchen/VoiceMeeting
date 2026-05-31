@@ -20,10 +20,19 @@ import {
   llmProviderLabel,
   micDeviceLabel,
   speakerModeName,
+  transcriptParts,
   transcriptVersionOption,
 } from "@/lib/meeting-display";
 import { I18nProvider, loadLocale, saveLocale } from "@/lib/i18n";
 import { api, apiUrl, fetchTextFile, readSse, wsUrl } from "@/lib/api-client";
+import { userFriendlyError } from "@/lib/error-messages";
+import {
+  findPlaybackChunkIndex,
+  notesOnlyMarkdown,
+  pipelineStepIndex,
+  playbackBounds,
+  titleFromAudioFile,
+} from "@/lib/meeting-state";
 import { requestNativeMicrophonePermission, safeDownloadName, saveTextFile } from "@/lib/platform-files";
 import {
   LIVE_WAVEFORM_BAR_COUNT,
@@ -77,15 +86,6 @@ function saveSelectedMicId(value) {
   }
 }
 
-function titleFromAudioFile(file) {
-  const name = file?.name || "导入音频";
-  return name.replace(/\.[^/.]+$/, "").trim() || name;
-}
-
-function notesOnlyMarkdown(markdown) {
-  return String(markdown || "").replace(/\n+##\s*原始转写\s*[\s\S]*$/u, "").trim();
-}
-
 function normalizeLlmConfig(value) {
   const openaiChat = value?.openai_chat || {};
   return {
@@ -111,142 +111,6 @@ function llmDraftFromConfig(value) {
 function promptDraftsFromConfig(value) {
   const prompts = Array.isArray(value?.prompts) ? value.prompts : [];
   return Object.fromEntries(prompts.map((item) => [item.key, item.value || item.default || ""]));
-}
-
-function userFriendlyError(message) {
-  const raw = String(message || "").trim();
-  if (!raw) return "操作没有完成，请稍后重试。";
-
-  let detail = raw;
-  try {
-    const parsed = JSON.parse(raw);
-    if (typeof parsed?.detail === "string") {
-      detail = parsed.detail;
-    } else if (Array.isArray(parsed?.detail)) {
-      detail = parsed.detail.map((item) => item?.msg || item).join("；");
-    }
-  } catch {
-    // Keep the raw message.
-  }
-
-  const lower = detail.toLowerCase();
-  if (lower.includes("meeting not found")) return "找不到这场会议，可能已经被删除。";
-  if (lower.includes("transcript version not found") || lower.includes("source transcript version not found")) {
-    return "找不到这份稿件，请刷新后再试。";
-  }
-  if (lower.includes("segment not found")) return "找不到这段文字，请刷新后再试。";
-  if (lower.includes("speaker not found")) return "当前稿件里没有找到这个说话人。";
-  if (lower.includes("manual edit version") || lower.includes("editable")) {
-    return "请先创建可编辑副本，再修改文字或说话人。";
-  }
-  if (lower.includes("prompt cannot be empty")) return "请输入要生成的内容。";
-  if (lower.includes("no transcript or summary")) return "这场会议还没有可用内容，录音或导入音频后再试。";
-  if (lower.includes("timed out") || lower.includes("timeout")) return "生成时间太久，已停止等待。请稍后重试。";
-  if (lower.includes("empty audio")) return "这段音频为空，请重新录制或导入。";
-  if (lower.includes("unsupported asr language")) return "当前语言暂不支持，请换一种语言设置。";
-  if (lower.includes("asr model is not available locally")) return "本地还没有这套识别资源，请选择已有的识别方式。";
-  if (lower.includes("unsupported asr model")) return "当前识别方式不可用，请换一个选项。";
-  if (lower === "not found" || lower.includes('"not found"')) {
-    return "当前本地语音服务版本过旧，请完全退出旧版 VoiceMeeting 后重新打开。";
-  }
-  if (lower.includes("ffmpeg") || lower.includes("invalid data") || lower.includes("error opening input")) {
-    return "音频文件无法读取，请换一个常见格式，或重新录制。";
-  }
-  if (lower.includes("audio file not found")) return "找不到本地音频文件，可能已经被移动或删除。";
-  if (lower.includes("chunk not found")) return "找不到这段音频，请刷新后再试。";
-  if (lower.includes("web audio") || lower.includes("audio playback") || lower.includes("audio decoding")) {
-    return "当前浏览器不支持这个音频操作，请换一个浏览器或重新导入音频。";
-  }
-  if (
-    lower.includes("notallowederror")
-    || lower.includes("not allowed by the user agent")
-    || lower.includes("permission denied")
-    || lower.includes("permission dismissed")
-    || lower.includes("麦克风权限")
-  ) {
-    return "麦克风权限未开启。请到系统设置的麦克风权限里允许 VoiceMeeting，然后重新开始录音。";
-  }
-  if (lower.includes("playback")) return "回放加载失败，请刷新后再试。";
-  if (lower.includes("vibearound") || lower.includes("bridge") || lower.includes("profile")) {
-    return "会议助手暂时不可用，请确认 VibeAround 正在运行后再试。";
-  }
-  if (/^http\s+\d+/i.test(detail) || /^\d{3}\s/.test(detail)) {
-    return "本地服务返回异常，请稍后重试。";
-  }
-  return detail;
-}
-
-function pipelineStepIndex(runtime, pendingChunks, pipelineStatus, finalizing, finalNotesWorking) {
-  const reprocess = runtime?.reprocess;
-  if (reprocess && ["queued", "running"].includes(reprocess.status)) {
-    const level = String(reprocess.level || "");
-    if (level === "notes") return 4;
-    if (level === "speaker") return 3;
-    if (level === "asr") return 2;
-    return -1;
-  }
-
-  const active = runtime?.active_chunks || [];
-  if (active.length > 0) {
-    const statusValue = active[0]?.status;
-    if (statusValue === "saved") return 0;
-    if (statusValue === "converting") return 1;
-    if (statusValue === "transcribing") return 2;
-    if (statusValue === "diarizing" || statusValue === "identifying_speakers") return 3;
-  }
-  if (pendingChunks > 0) return 0;
-
-  if (finalizing || finalNotesWorking) return 4;
-
-  const text = String(pipelineStatus || "");
-  if (text.includes("纪要") || text.includes("生成")) return 4;
-  if (text.includes("说话人")) return 3;
-  if (text.includes("识别")) return 2;
-  if (text.includes("转码") || text.includes("准备音频")) return 1;
-  if (text.includes("上传") || text.includes("整理") || text.includes("录音") || text.includes("保存音频")) return 0;
-  return -1;
-}
-
-function transcriptParts(item) {
-  if (Array.isArray(item?.parts) && item.parts.length > 0) {
-    return item.parts;
-  }
-  return [
-    {
-      id: item?.id,
-      text: item?.text || "",
-      start_ms: item?.start_ms,
-      end_ms: item?.end_ms,
-    },
-  ];
-}
-
-function playbackBounds(chunk) {
-  const startedAtMs = Number(chunk?.started_at_ms);
-  const trimStartMs = Number(chunk?.trim_start_ms);
-  const endedAtMs = Number(chunk?.ended_at_ms);
-  const playableDurationMs = Number(chunk?.playable_duration_ms);
-  const startMs = (Number.isFinite(startedAtMs) ? startedAtMs : 0)
-    + (Number.isFinite(trimStartMs) ? trimStartMs : 0);
-  let endMs = Number.isFinite(playableDurationMs) && playableDurationMs > 0
-    ? startMs + playableDurationMs
-    : endedAtMs;
-  if (!Number.isFinite(endMs) || endMs < startMs) {
-    const durationMs = Number(chunk?.duration_ms);
-    endMs = startMs + (Number.isFinite(durationMs) ? durationMs : 0);
-  }
-  return { startMs, endMs };
-}
-
-function findPlaybackChunkIndex(chunks, startAtMs) {
-  const targetMs = Number.isFinite(startAtMs) ? startAtMs : 0;
-  const containing = chunks.findIndex((chunk) => {
-    const bounds = playbackBounds(chunk);
-    return targetMs >= bounds.startMs && targetMs < bounds.endMs;
-  });
-  if (containing >= 0) return containing;
-  const next = chunks.findIndex((chunk) => playbackBounds(chunk).endMs > targetMs);
-  return next >= 0 ? next : 0;
 }
 
 function App() {
