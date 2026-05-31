@@ -1,4 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DeleteMeetingDialog } from "@/components/meeting/DeleteMeetingDialog";
 import { MeetingTimeline } from "@/components/meeting/MeetingTimeline";
@@ -24,6 +23,8 @@ import {
   transcriptVersionOption,
 } from "@/lib/meeting-display";
 import { I18nProvider, loadLocale, saveLocale } from "@/lib/i18n";
+import { api, apiUrl, fetchTextFile, readSse, wsUrl } from "@/lib/api-client";
+import { requestNativeMicrophonePermission, safeDownloadName, saveTextFile } from "@/lib/platform-files";
 import {
   ASR_MODEL_ORDER,
   DEFAULT_RECORDING_CONFIG,
@@ -35,8 +36,6 @@ import {
   recordingConfigsEqual,
 } from "@/lib/recording-config";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8788";
-const TAURI_AVAILABLE = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const LIVE_WAVEFORM_BAR_COUNT = 256;
 const MIC_DEVICE_STORAGE_KEY = "voice-meeting-mic-device";
 const DEFAULT_LLM_CONFIG = {
@@ -332,107 +331,6 @@ function makeFixedChunks(samples, sampleRate, config = DEFAULT_RECORDING_CONFIG)
     });
   }
   return chunks;
-}
-
-async function api(path, options = {}) {
-  const response = await fetch(`${API_BASE}${path}`, options);
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(userFriendlyError(text || `${response.status} ${response.statusText}`));
-  }
-  return response.json();
-}
-
-function wsUrl(path) {
-  const base = new URL(API_BASE);
-  base.protocol = base.protocol === "https:" ? "wss:" : "ws:";
-  return `${base.origin}${path}`;
-}
-
-function safeDownloadName(value, fallback = "meeting") {
-  return (String(value || fallback)
-    .replace(/[\\/:*?"<>|]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim() || fallback);
-}
-
-async function fetchTextFile(url) {
-  const response = await fetch(url);
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(userFriendlyError(text || `${response.status} ${response.statusText}`));
-  }
-  return response.text();
-}
-
-async function saveTextFile(filename, content) {
-  if (TAURI_AVAILABLE) {
-    const result = await invoke("save_markdown_file", {
-      defaultFilename: filename,
-      content,
-    });
-    return Boolean(result?.saved);
-  }
-
-  const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
-  const objectUrl = window.URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = objectUrl;
-  anchor.download = filename;
-  anchor.style.display = "none";
-  document.body.append(anchor);
-  anchor.click();
-  anchor.remove();
-  window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 1000);
-  return true;
-}
-
-async function requestNativeMicrophonePermission() {
-  if (!TAURI_AVAILABLE) return;
-  try {
-    await invoke("request_microphone_permission");
-  } catch (err) {
-    throw new Error(userFriendlyError(err));
-  }
-}
-
-async function readSse(response, handlers) {
-  if (!response.body) return;
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  const emit = (raw) => {
-    const clean = raw.trim();
-    if (!clean) return;
-    let event = "message";
-    const dataLines = [];
-    for (const line of clean.split("\n")) {
-      if (line.startsWith("event:")) {
-        event = line.slice(6).trim();
-      } else if (line.startsWith("data:")) {
-        dataLines.push(line.slice(5).trimStart());
-      }
-    }
-    const payloadText = dataLines.join("\n");
-    const payload = payloadText ? JSON.parse(payloadText) : {};
-    handlers[event]?.(payload);
-  };
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    buffer = buffer.replace(/\r\n/g, "\n");
-    let boundary = buffer.indexOf("\n\n");
-    while (boundary >= 0) {
-      emit(buffer.slice(0, boundary));
-      buffer = buffer.slice(boundary + 2);
-      boundary = buffer.indexOf("\n\n");
-    }
-  }
-  buffer += decoder.decode();
-  emit(buffer);
 }
 
 function transcriptParts(item) {
@@ -2004,7 +1902,7 @@ function App() {
     try {
       await uploadChainRef.current;
       setPipelineStatus("最终纪要生成中");
-      const response = await fetch(`${API_BASE}/api/meetings/${id}/finalize/stream`, {
+      const response = await fetch(apiUrl(`/api/meetings/${id}/finalize/stream`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ force_local: false }),
@@ -2234,7 +2132,7 @@ function App() {
     const cached = playbackCacheRef.current.get(key);
     if (cached) return cached;
 
-    const response = await fetch(`${API_BASE}${chunk.audio_url}`);
+    const response = await fetch(apiUrl(chunk.audio_url));
     if (!response.ok) {
       throw new Error(`回放加载失败：${response.status}`);
     }
@@ -2497,7 +2395,7 @@ function App() {
       if (!id || downloadBusy) return;
       const titleBase = safeDownloadName(meeting?.title || "今天的会议");
       const isTranscript = kind === "transcript";
-      const url = `${API_BASE}/api/meetings/${id}/${isTranscript ? "transcript.md" : "export.md"}`;
+      const url = apiUrl(`/api/meetings/${id}/${isTranscript ? "transcript.md" : "export.md"}`);
       const filename = isTranscript ? `${titleBase}-逐字稿.md` : `${titleBase}.md`;
       setDownloadBusy(kind);
       setError("");
