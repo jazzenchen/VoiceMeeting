@@ -89,6 +89,7 @@ from .transcription_helpers import (
     existing_audio_path,
     segments_or_unrecognized,
 )
+from .transcription_pipeline import ChunkTranscriptionPipeline
 from .vibearound import VibeAroundClient
 
 
@@ -1723,7 +1724,7 @@ async def upload_chunk(
     cut_reason: str = Form(""),
 ) -> Dict[str, Any]:
     try:
-        meeting_before = store.get_meeting(meeting_id)
+        store.get_meeting(meeting_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="找不到这场会议，可能已经被删除。")
 
@@ -1757,91 +1758,21 @@ async def upload_chunk(
         ended_at_ms=parsed_ended_at_ms,
         cut_reason=cut_reason,
     )
-    audio_path = Path(chunk["audio_path"])
-    if audio_path.suffix.lower() == ".wav":
-        wav_path = audio_path.with_name(f"{audio_path.stem}_16k.wav")
-    else:
-        wav_path = audio_path.with_suffix(".wav")
     try:
-        store.update_chunk(chunk["id"], status="converting")
-        asr.convert_to_wav(audio_path, wav_path)
-        store.update_chunk(chunk["id"], wav_path=str(wav_path), status="transcribing")
-        meeting_for_prompt = store.get_meeting(meeting_id)
-        recent_context = "\n".join(
-            segment.get("text", "")
-            for segment in (meeting_for_prompt.get("segments") or [])[-6:]
-            if segment.get("text")
-            and not is_unrecognized_text(segment.get("text"))
+        transcription = await ChunkTranscriptionPipeline(
+            store=store,
+            audio_converter=asr,
+            prompt_getter=prompt_settings.get,
+            diarizer_for_mode=diarizer_for_mode,
+            speaker_tracker=speaker_tracker,
+        ).process(
+            meeting_id=meeting_id,
+            chunk=chunk,
+            asr_engine=asr_engine,
+            requested_language=requested_language,
+            requested_model=requested_model,
+            requested_speaker_mode=requested_speaker_mode,
         )
-        result = await asyncio.to_thread(
-            asr_engine.transcribe,
-            wav_path,
-            requested_language,
-            asr_context_prompt(
-                meeting_for_prompt,
-                recent_context,
-                prompt_settings.get("asr_context", ""),
-            ),
-        )
-        diarization_result = {
-            "status": "disabled",
-            "mode": requested_speaker_mode,
-            "turns": [],
-            "error": "",
-        }
-        active_diarizer = diarizer_for_mode(requested_speaker_mode)
-        if active_diarizer is not None:
-            try:
-                store.update_chunk(chunk["id"], status="diarizing")
-                turns = await asyncio.to_thread(active_diarizer.diarize, wav_path)
-                if requested_speaker_mode == "diarization" or not speaker_tracker.enabled:
-                    result["segments"] = assign_speakers(result["segments"], turns)
-                diarization_result = {
-                    "status": "done",
-                    "mode": requested_speaker_mode,
-                    "turns": turns,
-                    "error": "",
-                }
-            except DiarizationUnavailable as exc:
-                diarization_result = {
-                    "status": "error",
-                    "mode": requested_speaker_mode,
-                    "turns": [],
-                    "error": str(exc),
-                }
-        speaker_result = {
-            "status": "disabled",
-            "mode": requested_speaker_mode,
-            "assigned": 0,
-            "created": 0,
-            "error": "",
-        }
-        use_speaker_tracking = speaker_tracker.enabled and requested_speaker_mode in {
-            "voiceprint",
-            "auto",
-        }
-        if use_speaker_tracking:
-            try:
-                store.update_chunk(chunk["id"], status="identifying_speakers")
-                result["segments"], speaker_result = await asyncio.to_thread(
-                    speaker_tracker.assign_segments,
-                    store,
-                    meeting_id,
-                    wav_path,
-                    result["segments"],
-                )
-                speaker_result["mode"] = requested_speaker_mode
-            except SpeakerTrackingUnavailable as exc:
-                speaker_result = {
-                    "status": "error",
-                    "mode": requested_speaker_mode,
-                    "assigned": 0,
-                    "created": 0,
-                    "error": str(exc),
-                }
-        segments_to_store = segments_or_unrecognized(chunk, result.get("segments") or [])
-        inserted = store.add_segments(meeting_id, chunk["id"], segments_to_store)
-        store.update_chunk(chunk["id"], status="done")
     except asyncio.CancelledError:
         store.update_chunk(chunk["id"], status="error", error="请求已取消。")
         raise
@@ -1853,26 +1784,26 @@ async def upload_chunk(
         raise HTTPException(status_code=500, detail=str(exc))
 
     meeting = store.get_meeting(meeting_id)
-    if inserted:
+    if transcription.inserted:
         store.clear_final_markdown(meeting_id)
 
     return {
         "chunk": store.get_chunk(chunk["id"]),
-        "segments": inserted,
+        "segments": transcription.inserted,
         "utterances": meeting.get("utterances") or [],
         "summary": meeting["summary"],
         "runtime": meeting_runtime(meeting_id),
         "asr": {
-            "requested_language": result.get("requested_language"),
+            "requested_language": transcription.asr.get("requested_language"),
             "model": requested_model,
-            "language": result.get("language"),
-            "language_probability": result.get("language_probability"),
-            "top_languages": result.get("top_languages") or [],
-            "multilingual": result.get("multilingual"),
-            "vad_segments": result.get("vad_segments") or [],
+            "language": transcription.asr.get("language"),
+            "language_probability": transcription.asr.get("language_probability"),
+            "top_languages": transcription.asr.get("top_languages") or [],
+            "multilingual": transcription.asr.get("multilingual"),
+            "vad_segments": transcription.asr.get("vad_segments") or [],
         },
-        "diarization": diarization_result,
-        "speaker_tracking": speaker_result,
+        "diarization": transcription.diarization,
+        "speaker_tracking": transcription.speaker_tracking,
         "summary_status": "idle",
     }
 
