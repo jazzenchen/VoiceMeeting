@@ -32,7 +32,8 @@ from .api.schemas import (
     UpdateMeetingRequest,
     UpdateSegmentRequest,
 )
-from .asr import ASRUnavailable, FasterWhisperASR, FunASRASR, MlxWhisperASR
+from .asr import ASRUnavailable
+from .asr_runtime import ASRRuntime
 from .config import (
     ALLOW_MODEL_DOWNLOAD,
     ASR_MODEL,
@@ -55,13 +56,11 @@ from .model_registry import (
     PYANNOTE_COMMUNITY_REPO_ID,
     PYANNOTE_MODEL_DIR,
     SUPPORTED_ASR_MODELS,
-    asr_base_model_name,
     asr_model_backend,
     asr_model_cache_dir,
     asr_model_cache_path,
     asr_model_cache_paths,
     asr_model_repos,
-    asr_repo_cache_path,
     directory_size_bytes,
     discovered_asr_models,
     funasr_model_marker_path,
@@ -106,8 +105,7 @@ app.add_middleware(
 
 store = MeetingStore()
 store.mark_interrupted_chunks(error="服务重启时识别被中断，请重新识别这段音频。")
-asr = FasterWhisperASR()
-asr_engines: Dict[str, FasterWhisperASR] = {}
+asr_runtime = ASRRuntime()
 diarizer = PyannoteDiarizer()
 local_pyannote_diarizer: Optional[PyannoteDiarizer] = None
 speaker_tracker = SpeakerTracker()
@@ -121,7 +119,6 @@ summary_states: Dict[str, Dict[str, Any]] = {}
 reprocess_states: Dict[str, Dict[str, Any]] = {}
 REALTIME_SUMMARY_ENABLED = False
 model_download_states: Dict[str, Dict[str, Any]] = {}
-model_load_lock = threading.Lock()
 recording_model_load_error = ""
 llm_status_cache: Dict[str, Any] = {"updated_at": 0.0, "value": {}}
 llm_status_lock = asyncio.Lock()
@@ -239,9 +236,7 @@ def model_catalog() -> Dict[str, Any]:
         for name, meta in catalog.items():
             path = asr_model_cache_path(name)
             installed = name in installed_asr
-            cached_engine = asr_engines.get(name)
-            loaded = (name == ASR_MODEL and asr.loaded) or bool(cached_engine and cached_engine.loaded)
-            loading = (name == ASR_MODEL and asr.loading) or bool(cached_engine and cached_engine.loading)
+            runtime_flags = asr_runtime.model_runtime_flags(name)
             asr_models.append(
                 {
                     "kind": "asr",
@@ -258,8 +253,8 @@ def model_catalog() -> Dict[str, Any]:
                     "path": str(path),
                     "size_bytes": directory_size_bytes(path) if installed else 0,
                     "current": name == ASR_MODEL,
-                    "loaded": loaded,
-                    "loading": loading,
+                    "loaded": runtime_flags["loaded"],
+                    "loading": runtime_flags["loading"],
                     "job": latest_model_job("asr", name),
                     "backend": backend,
                     "backend_label": backend_label,
@@ -618,7 +613,7 @@ async def download_model_job(job_id: str, kind: str, model: str) -> None:
                 raise ValueError("当前识别模型不可用。")
             if asr_model_backend(model) == "funasr":
                 set_model_download_state(job_id, stage="加载 FunASR 模型", progress=0.2)
-                engine = asr_engine_for_model(model)
+                engine = asr_runtime.engine_for_model(model)
                 await asyncio.to_thread(engine.load)
                 mark_funasr_model_installed(model)
                 set_model_download_state(job_id, stage="整理模型文件", progress=0.95)
@@ -860,7 +855,7 @@ def meeting_runtime(meeting_id: str) -> Dict[str, Any]:
         "has_active_chunks": bool(active_chunks),
         "summary": summary_state,
         "reprocess": latest_reprocess_state(meeting_id),
-        "asr": active_asr_status(),
+        "asr": asr_runtime.active_status(),
         "diarization": diarizer.status(),
         "speaker_tracking": speaker_tracker.status(),
         "llm": llm.describe(),
@@ -1016,11 +1011,9 @@ async def delete_model(kind: str, model: str) -> Dict[str, Any]:
     if clean_kind == "asr":
         if clean_model not in SUPPORTED_ASR_MODELS:
             raise HTTPException(status_code=400, detail="当前识别模型不可用。")
-        if clean_model == asr.model_name and asr.loaded:
-            raise HTTPException(status_code=409, detail="当前识别模型已加载，请重启服务后再删除。")
-        cached_engine = asr_engines.get(clean_model)
-        if cached_engine is not None and cached_engine.loaded:
-            raise HTTPException(status_code=409, detail="这个识别模型已加载，请重启服务后再删除。")
+        if asr_runtime.is_loaded(clean_model):
+            detail = "当前识别模型已加载，请重启服务后再删除。" if clean_model == ASR_MODEL else "这个识别模型已加载，请重启服务后再删除。"
+            raise HTTPException(status_code=409, detail=detail)
     elif clean_kind == "diarization" and clean_model == PYANNOTE_COMMUNITY_MODEL_ID:
         if diarizer.loaded or bool(local_pyannote_diarizer and local_pyannote_diarizer.loaded):
             raise HTTPException(status_code=409, detail="说话人分离模型已加载，请重启服务后再删除。")
@@ -1041,7 +1034,7 @@ async def health() -> Dict[str, Any]:
         "features": ["models.load", "native-save", "i18n"],
         "project_dir": str(PROJECT_DIR),
         "asr_model": ASR_MODEL,
-        "asr": active_asr_status(),
+        "asr": asr_runtime.active_status(),
         "diarization": diarizer.status(),
         "speaker_tracking": speaker_tracker.status(),
     }
@@ -1299,7 +1292,7 @@ async def start_reprocess_job(
             raise HTTPException(status_code=400, detail="当前语言暂不支持，请换一种语言设置。")
         requested_model = normalize_asr_model(active_recording_config.get("asr_model"))
         try:
-            require_loaded_asr_engine(requested_model)
+            asr_runtime.require_loaded_engine(requested_model)
         except ASRUnavailable as exc:
             raise HTTPException(status_code=503, detail=str(exc))
         source_version_id = payload.source_version_id or meeting.get("active_version_id") or "auto"
@@ -1735,7 +1728,7 @@ async def upload_chunk(
     requested_model = normalize_asr_model(active_recording_config.get("asr_model") or asr_model)
     requested_speaker_mode = resolve_speaker_mode(str(active_recording_config.get("speaker_mode") or speaker_mode))
     try:
-        asr_engine = require_loaded_asr_engine(requested_model)
+        asr_engine = asr_runtime.require_loaded_engine(requested_model)
     except ASRUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc))
 
@@ -1761,7 +1754,7 @@ async def upload_chunk(
     try:
         transcription = await ChunkTranscriptionPipeline(
             store=store,
-            audio_converter=asr,
+            audio_converter=asr_runtime.audio_converter,
             prompt_getter=prompt_settings.get,
             diarizer_for_mode=diarizer_for_mode,
             speaker_tracker=speaker_tracker,
@@ -1821,117 +1814,9 @@ def prepare_chunk_wav(chunk: Dict[str, Any]) -> Path:
         wav_path = audio_path.with_name(f"{audio_path.stem}_16k.wav")
     else:
         wav_path = audio_path.with_suffix(".wav")
-    asr.convert_to_wav(audio_path, wav_path)
+    asr_runtime.audio_converter.convert_to_wav(audio_path, wav_path)
     store.update_chunk(chunk["id"], wav_path=str(wav_path))
     return wav_path
-
-
-def asr_engine_for_model(model_name: str) -> FasterWhisperASR:
-    if model_name == asr.model_name and asr_model_backend(model_name) == "faster-whisper":
-        return asr
-    engine = asr_engines.get(model_name)
-    if engine is None:
-        backend = asr_model_backend(model_name)
-        if backend == "mlx":
-            engine = MlxWhisperASR(
-                model_name=asr_base_model_name(model_name),
-                repo_id=asr_model_repos(model_name)[0],
-                display_name=model_name,
-            )
-        elif backend == "funasr":
-            meta = FUNASR_MODEL_CATALOG.get(model_name, {})
-            engine = FunASRASR(
-                model_name=model_name,
-                model_id=str(meta.get("model_id") or meta.get("repo_id") or model_name),
-                display_name=model_name,
-                trust_remote_code=bool(meta.get("trust_remote_code")),
-            )
-        else:
-            runtime_model = model_name
-            for repo_id in asr_model_repos(model_name):
-                if (asr_repo_cache_path(repo_id, ASR_MODEL_DIR) / "snapshots").exists():
-                    runtime_model = repo_id
-                    break
-            engine = FasterWhisperASR(model_name=runtime_model)
-        asr_engines[model_name] = engine
-    return engine
-
-
-def asr_model_label(model_name: str) -> str:
-    catalogs = {
-        "mlx": MLX_ASR_MODEL_CATALOG,
-        "funasr": FUNASR_MODEL_CATALOG,
-    }
-    meta = catalogs.get(asr_model_backend(model_name), ASR_MODEL_CATALOG).get(model_name)
-    return str((meta or {}).get("label") or model_name)
-
-
-def asr_engine_status(model_name: str, engine: FasterWhisperASR) -> Dict[str, Any]:
-    status = dict(engine.status())
-    status["model"] = model_name
-    status["label"] = asr_model_label(model_name)
-    if engine.model_name != model_name:
-        status["runtime_model"] = engine.model_name
-    return status
-
-
-def loaded_asr_engine_items() -> list[tuple[str, FasterWhisperASR]]:
-    items: list[tuple[str, FasterWhisperASR]] = []
-    if asr.loaded:
-        items.append((ASR_MODEL, asr))
-    for model_name, engine in asr_engines.items():
-        if engine.loaded:
-            items.append((model_name, engine))
-    return items
-
-
-def active_asr_status(include_available: bool = False) -> Dict[str, Any]:
-    def with_available(status: Dict[str, Any]) -> Dict[str, Any]:
-        if include_available:
-            return {**status, "available_models": local_asr_models()}
-        return status
-
-    for model_name, engine in loaded_asr_engine_items():
-        return with_available(asr_engine_status(model_name, engine))
-    if asr.loading:
-        return with_available(asr_engine_status(ASR_MODEL, asr))
-    for model_name, engine in asr_engines.items():
-        if engine.loading:
-            return with_available(asr_engine_status(model_name, engine))
-    return with_available(asr.status())
-
-
-def require_loaded_asr_engine(model_name: str) -> FasterWhisperASR:
-    engine = asr_engine_for_model(model_name)
-    if not engine.loaded:
-        raise ASRUnavailable("识别模型尚未加载，请先在设置中加载模型。")
-    return engine
-
-
-def load_asr_model_sync(model_name: str) -> Dict[str, Any]:
-    requested_model = normalize_asr_model(model_name)
-    with model_load_lock:
-        unloaded = []
-        for loaded_model, engine in loaded_asr_engine_items():
-            if loaded_model == requested_model:
-                continue
-            engine.unload()
-            unloaded.append({
-                "model": loaded_model,
-                "label": asr_model_label(loaded_model),
-            })
-
-        engine = asr_engine_for_model(requested_model)
-        engine.load()
-        if asr_model_backend(requested_model) == "funasr":
-            mark_funasr_model_installed(requested_model)
-        return {
-            "kind": "asr",
-            "model": requested_model,
-            "label": asr_model_label(requested_model),
-            "unloaded": unloaded,
-            "status": asr_engine_status(requested_model, engine),
-        }
 
 
 @app.post("/api/models/load")
@@ -1940,7 +1825,8 @@ async def load_model(payload: ModelDownloadRequest) -> Dict[str, Any]:
     if kind != "asr":
         raise HTTPException(status_code=400, detail="当前只支持加载语音识别模型。")
     try:
-        result = await asyncio.to_thread(load_asr_model_sync, payload.model)
+        requested_model = normalize_asr_model(payload.model)
+        result = await asyncio.to_thread(asr_runtime.load_model_sync, requested_model)
         return {**result, "catalog": model_catalog()}
     except HTTPException:
         raise
@@ -1949,7 +1835,7 @@ async def load_model(payload: ModelDownloadRequest) -> Dict[str, Any]:
 
 
 def configured_asr_loaded(model_name: str) -> bool:
-    return any(loaded_model == model_name for loaded_model, _engine in loaded_asr_engine_items())
+    return asr_runtime.is_loaded(model_name)
 
 
 def recording_config_response() -> Dict[str, Any]:
@@ -1958,7 +1844,7 @@ def recording_config_response() -> Dict[str, Any]:
         "ok": True,
         "api_revision": 3,
         "config": config,
-        "asr": active_asr_status(),
+        "asr": asr_runtime.active_status(),
         "configured_model_loaded": configured_asr_loaded(config["asr_model"]),
         "load_error": recording_model_load_error,
         "asr_options": asr_model_options(),
@@ -2002,7 +1888,7 @@ async def load_recording_model_from_config() -> None:
     global recording_model_load_error
     config = recording_config.read()
     try:
-        await asyncio.to_thread(load_asr_model_sync, config["asr_model"])
+        await asyncio.to_thread(asr_runtime.load_model_sync, config["asr_model"])
         recording_model_load_error = ""
     except Exception as exc:
         recording_model_load_error = str(exc)
@@ -2031,7 +1917,7 @@ async def update_recording_config(payload: RecordingConfigRequest) -> Dict[str, 
     recording_config.save(next_config)
     try:
         if needs_load:
-            await asyncio.to_thread(load_asr_model_sync, requested_model)
+            await asyncio.to_thread(asr_runtime.load_model_sync, requested_model)
         recording_model_load_error = ""
     except Exception as exc:
         recording_model_load_error = str(exc)
@@ -2066,7 +1952,7 @@ async def reprocess_asr_version(
     assigned_total = 0
     created_total = 0
     try:
-        asr_engine = require_loaded_asr_engine(model_name)
+        asr_engine = asr_runtime.require_loaded_engine(model_name)
         meeting = store.get_meeting(meeting_id)
         chunks = [
             chunk
