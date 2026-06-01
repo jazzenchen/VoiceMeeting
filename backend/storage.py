@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .config import CHUNKS_DIR, DB_PATH, ensure_runtime_dirs
-from .transcript import build_utterances
+from .transcript import build_utterances, is_unrecognized_text
 
 
 DEFAULT_SUMMARY: Dict[str, Any] = {
@@ -253,6 +253,7 @@ class MeetingStore:
             }
             for segment in segments
             if str(segment.get("text") or "").strip()
+            and not is_unrecognized_text(segment.get("text"))
         ]
         digest = hashlib.sha1(
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -347,10 +348,39 @@ class MeetingStore:
 
     def update_meeting_status(self, meeting_id: str, status: str) -> None:
         with self._lock, self._connect() as conn:
-            conn.execute(
+            result = conn.execute(
                 "UPDATE meetings SET status = ?, updated_at = ? WHERE id = ?",
                 (status, now_iso(), meeting_id),
             )
+            if result.rowcount == 0:
+                raise KeyError(meeting_id)
+
+    def mark_interrupted_chunks(
+        self,
+        meeting_id: Optional[str] = None,
+        error: str = "处理被中断，请重新识别这段音频。",
+    ) -> int:
+        active_statuses = ("saved", "converting", "transcribing", "diarizing", "identifying_speakers")
+        placeholders = ", ".join("?" for _ in active_statuses)
+        values: List[Any] = [error, *active_statuses]
+        meeting_clause = ""
+        if meeting_id is not None:
+            meeting_clause = " AND meeting_id = ?"
+            values.append(meeting_id)
+        with self._lock, self._connect() as conn:
+            if meeting_id is not None:
+                meeting = conn.execute("SELECT id FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
+                if meeting is None:
+                    raise KeyError(meeting_id)
+            result = conn.execute(
+                f"""
+                UPDATE chunks
+                SET status = 'error', error = ?
+                WHERE status IN ({placeholders}){meeting_clause}
+                """,
+                values,
+            )
+            return result.rowcount
 
     def update_meeting_title(
         self,
@@ -548,6 +578,79 @@ class MeetingStore:
                 "DELETE FROM segments WHERE meeting_id = ? AND version_id = ?",
                 (meeting_id, version_id),
             )
+
+    def delete_transcript_version(self, meeting_id: str, version_id: str) -> Dict[str, Any]:
+        if version_id == "auto":
+            raise ValueError("原始稿不能删除。")
+        stamp = now_iso()
+        with self._lock, self._connect() as conn:
+            version = self._transcript_version(conn, meeting_id, version_id)
+            if str(version.get("status") or "") in {"queued", "running"}:
+                raise RuntimeError("这份稿件还在处理，完成后再删除。")
+
+            active_version_id = self._active_version_id(conn, meeting_id)
+            parent_version_id = str(version.get("parent_version_id") or "auto")
+            fallback_version_id = "auto"
+            if parent_version_id and parent_version_id != version_id:
+                parent = conn.execute(
+                    """
+                    SELECT id FROM transcript_versions
+                    WHERE meeting_id = ? AND id = ?
+                    """,
+                    (meeting_id, parent_version_id),
+                ).fetchone()
+                if parent is not None:
+                    fallback_version_id = parent_version_id
+
+            if active_version_id == version_id:
+                conn.execute(
+                    """
+                    UPDATE meetings
+                    SET active_version_id = ?, summary_json = ?, summary_source_hash = '',
+                        summary_source_version_id = '', final_markdown = '', final_source_hash = '',
+                        final_source_version_id = '', updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        fallback_version_id,
+                        json.dumps(DEFAULT_SUMMARY, ensure_ascii=False),
+                        stamp,
+                        meeting_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE meetings
+                    SET summary_json = ?, summary_source_hash = '', summary_source_version_id = '',
+                        updated_at = ?
+                    WHERE id = ? AND summary_source_version_id = ?
+                    """,
+                    (json.dumps(DEFAULT_SUMMARY, ensure_ascii=False), stamp, meeting_id, version_id),
+                )
+                conn.execute(
+                    """
+                    UPDATE meetings
+                    SET final_markdown = '', final_source_hash = '', final_source_version_id = '',
+                        updated_at = ?
+                    WHERE id = ? AND final_source_version_id = ?
+                    """,
+                    (stamp, meeting_id, version_id),
+                )
+
+            conn.execute(
+                "DELETE FROM final_notes WHERE meeting_id = ? AND version_id = ?",
+                (meeting_id, version_id),
+            )
+            conn.execute(
+                "DELETE FROM segments WHERE meeting_id = ? AND version_id = ?",
+                (meeting_id, version_id),
+            )
+            conn.execute(
+                "DELETE FROM transcript_versions WHERE meeting_id = ? AND id = ?",
+                (meeting_id, version_id),
+            )
+        return self.get_meeting(meeting_id)
 
     def create_transcript_version(
         self,

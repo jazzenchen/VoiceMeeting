@@ -1,4 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DeleteMeetingDialog } from "@/components/meeting/DeleteMeetingDialog";
 import { MeetingTimeline } from "@/components/meeting/MeetingTimeline";
@@ -11,727 +10,58 @@ import { StartupBanner } from "@/components/meeting/StartupBanner";
 import { TopBar } from "@/components/meeting/TopBar";
 import { TranscriptPane } from "@/components/meeting/TranscriptPane";
 import { clampAppearance, loadAppearance, saveAppearance } from "@/lib/appearance";
+import {
+  asrBackendForModel,
+  asrBackendLabel,
+  asrModelName,
+  inputGainName,
+  isUnrecognizedTranscriptItem,
+  languageName,
+  llmProviderLabel,
+  micDeviceLabel,
+  speakerModeName,
+  transcriptParts,
+  transcriptVersionOption,
+} from "@/lib/meeting-display";
 import { I18nProvider, loadLocale, saveLocale } from "@/lib/i18n";
-
-const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8788";
-const TAURI_AVAILABLE = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-const MAX_SEGMENT_MS = 15000;
-const LIVE_WAVEFORM_BAR_COUNT = 256;
-const RECORDING_CONFIG_STORAGE_KEY = "voice-meeting-recording-config";
-const MIC_DEVICE_STORAGE_KEY = "voice-meeting-mic-device";
-const DEFAULT_LLM_CONFIG = {
-  provider: "vibearound",
-  openai_chat: {
-    base_url: "",
-    model: "",
-    has_api_key: false,
-  },
-};
-const WAVE_PATTERN = [0.35, 0.62, 0.48, 0.84, 0.58, 1.0, 0.72, 0.42, 0.68, 0.92, 0.54, 0.78];
-const LANGUAGE_OPTIONS = [
-  ["auto", "自动多语种"],
-  ["mixed", "中英优先"],
-  ["zh", "中文"],
-  ["en", "English"],
-  ["ja", "日本語"],
-  ["ko", "한국어"],
-  ["fr", "Français"],
-  ["de", "Deutsch"],
-  ["es", "Español"],
-  ["ru", "Русский"],
-  ["pt", "Português"],
-];
-const INPUT_GAIN_OPTIONS = [
-  [1, "原声"],
-  [1.3, "轻度增强"],
-  [1.6, "会议增强"],
-  [2, "远距增强"],
-];
-const DEFAULT_RECORDING_CONFIG = {
-  language: "mixed",
-  asrModel: "small",
-  speakerMode: "voiceprint",
-  maxSegmentMs: MAX_SEGMENT_MS,
-  inputGain: 1,
-};
-const SPEAKER_MODE_OPTIONS = [
-  ["voiceprint", "声纹跟踪"],
-  ["diarization", "高精度分离"],
-  ["off", "不区分"],
-];
-const FASTER_ASR_MODEL_ORDER = ["tiny", "base", "small", "medium", "large-v3-turbo", "large-v3"];
-const MLX_ASR_MODEL_ORDER = FASTER_ASR_MODEL_ORDER.map((model) => `mlx-${model}`);
-const ASR_MODEL_ORDER = [...FASTER_ASR_MODEL_ORDER, ...MLX_ASR_MODEL_ORDER];
-const PIPELINE_STEPS = ["上传", "转码", "识别", "说话人", "纪要"];
-
-function languageName(value) {
-  const option = LANGUAGE_OPTIONS.find(([key]) => key === value);
-  return option?.[1] || value || "自动";
-}
-
-function speakerModeName(value) {
-  const option = SPEAKER_MODE_OPTIONS.find(([key]) => key === value);
-  return option?.[1] || value || "声纹跟踪";
-}
-
-function clampRecordingConfig(value = {}) {
-  const config = { ...DEFAULT_RECORDING_CONFIG, ...value };
-  const maxSegmentMs = Number(config.maxSegmentMs);
-  const inputGain = Number(config.inputGain);
-  return {
-    language: LANGUAGE_OPTIONS.some(([key]) => key === config.language) ? config.language : "mixed",
-    asrModel: ASR_MODEL_ORDER.includes(config.asrModel) ? config.asrModel : "small",
-    speakerMode: SPEAKER_MODE_OPTIONS.some(([key]) => key === config.speakerMode)
-      ? config.speakerMode
-      : "voiceprint",
-    maxSegmentMs: Number.isFinite(maxSegmentMs) ? Math.min(30000, Math.max(8000, maxSegmentMs)) : MAX_SEGMENT_MS,
-    inputGain: Number.isFinite(inputGain) ? Math.min(2.5, Math.max(0.8, inputGain)) : DEFAULT_RECORDING_CONFIG.inputGain,
-  };
-}
-
-function loadRecordingConfig() {
-  try {
-    const raw = window.localStorage.getItem(RECORDING_CONFIG_STORAGE_KEY);
-    return clampRecordingConfig(raw ? JSON.parse(raw) : DEFAULT_RECORDING_CONFIG);
-  } catch {
-    return clampRecordingConfig(DEFAULT_RECORDING_CONFIG);
-  }
-}
-
-function saveRecordingConfig(value) {
-  try {
-    window.localStorage.setItem(RECORDING_CONFIG_STORAGE_KEY, JSON.stringify(clampRecordingConfig(value)));
-  } catch {
-    // Local persistence is best-effort.
-  }
-}
-
-function loadSelectedMicId() {
-  try {
-    return window.localStorage.getItem(MIC_DEVICE_STORAGE_KEY) || "";
-  } catch {
-    return "";
-  }
-}
-
-function saveSelectedMicId(value) {
-  try {
-    if (value) {
-      window.localStorage.setItem(MIC_DEVICE_STORAGE_KEY, value);
-    } else {
-      window.localStorage.removeItem(MIC_DEVICE_STORAGE_KEY);
-    }
-  } catch {
-    // Local persistence is best-effort.
-  }
-}
-
-function micDeviceLabel(device, index) {
-  if (device?.label) return device.label;
-  if (device?.deviceId === "default") return "系统默认麦克风";
-  return `麦克风 ${index + 1}`;
-}
-
-function inputGainName(value) {
-  const numeric = Number(value);
-  const option = INPUT_GAIN_OPTIONS.find(([key]) => key === numeric);
-  return option?.[1] || `${numeric.toFixed(1)}x`;
-}
-
-function bytesLabel(value) {
-  const bytes = Number(value);
-  if (!Number.isFinite(bytes) || bytes <= 0) return "";
-  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)}GB`;
-  if (bytes >= 1024 ** 2) return `${Math.round(bytes / 1024 ** 2)}MB`;
-  return `${Math.round(bytes / 1024)}KB`;
-}
-
-function progressPercent(job) {
-  const value = Number(job?.progress);
-  if (!Number.isFinite(value)) return 0;
-  return Math.max(0, Math.min(100, Math.round(value * 100)));
-}
-
-function downloadBytesText(job) {
-  const downloaded = Number(job?.downloaded_bytes);
-  const total = Number(job?.total_bytes);
-  if (Number.isFinite(downloaded) && downloaded > 0 && Number.isFinite(total) && total > 0) {
-    return `${bytesLabel(downloaded)} / ${bytesLabel(total)}`;
-  }
-  if (Number.isFinite(total) && total > 0) return bytesLabel(total);
-  return "";
-}
-
-function downloadStageText(job) {
-  const parts = [job?.stage, job?.file, downloadBytesText(job)]
-    .map((item) => String(item || "").trim())
-    .filter(Boolean);
-  return parts.join(" · ");
-}
-
-function formatTime(value) {
-  if (!value) return "";
-  return new Intl.DateTimeFormat("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).format(new Date(value));
-}
-
-function titleFromAudioFile(file) {
-  const name = file?.name || "导入音频";
-  return name.replace(/\.[^/.]+$/, "").trim() || name;
-}
-
-function notesOnlyMarkdown(markdown) {
-  return String(markdown || "").replace(/\n+##\s*原始转写\s*[\s\S]*$/u, "").trim();
-}
-
-function formatOffset(value) {
-  if (!Number.isFinite(value)) return "";
-  const totalSeconds = Math.max(0, Math.floor(value / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  if (hours > 0) {
-    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-  }
-  return `${minutes}:${String(seconds).padStart(2, "0")}`;
-}
-
-function formatAsrDisplay(asr, fallback) {
-  if (!asr) return languageName(fallback);
-  const topLanguages = Array.isArray(asr.top_languages) ? asr.top_languages.slice(0, 3) : [];
-  if (topLanguages.length > 0) {
-    return topLanguages
-      .map((item) => `${languageName(item.language)} ${Math.round((item.probability || 0) * 100)}%`)
-      .join(" · ");
-  }
-  if (asr.language) {
-    const confidence = Number.isFinite(asr.language_probability)
-      ? ` ${Math.round(asr.language_probability * 100)}%`
-      : "";
-    return `${languageName(asr.language)}${confidence}`;
-  }
-  return languageName(fallback);
-}
-
-function transcriptVersionName(version, fallbackId = "auto") {
-  const kind = version?.kind || (fallbackId === "auto" ? "initial" : "");
-  const names = {
-    initial: "原始稿",
-    asr: "重新识别稿",
-    speaker: "说话人修正版",
-    merge: "段落整理稿",
-    "llm-repair": "文字精修稿",
-    "manual-edit": "手动修改稿",
-    manual: "手动稿",
-  };
-  return names[kind] || version?.label || fallbackId || "当前稿";
-}
-
-function transcriptVersionOption(version) {
-  const name = transcriptVersionName(version, version?.id);
-  const time = formatTime(version?.created_at);
-  return time ? `${name} · ${time}` : name;
-}
-
-function transcriptVersionHint(version, editable) {
-  if (editable) return "这份可以直接改文字和人名。";
-  const name = transcriptVersionName(version, version?.id);
-  if ((version?.kind || "initial") === "initial") return `${name}会保留不动；需要改字时先创建副本。`;
-  return `${name}会保留不动；需要手动改时先创建副本。`;
-}
-
-function asrModelName(model) {
-  if (String(model || "").startsWith("mlx-")) {
-    return `MLX ${asrModelName(String(model).slice(4))}`;
-  }
-  const names = {
-    tiny: "轻量识别",
-    base: "快速识别",
-    small: "标准识别",
-    medium: "高精度识别",
-    "large-v3": "最高精度识别",
-    "large-v3-turbo": "高精度加速",
-  };
-  return names[model] || model;
-}
-
-function firstInstalledAsrModel(models, preferredModel) {
-  const installed = new Set(
-    (models || [])
-      .filter((item) => item?.installed)
-      .map((item) => item.name || item.id)
-      .filter(Boolean),
-  );
-  if (preferredModel && installed.has(preferredModel)) return preferredModel;
-  if (installed.has(DEFAULT_RECORDING_CONFIG.asrModel)) return DEFAULT_RECORDING_CONFIG.asrModel;
-  return ASR_MODEL_ORDER.find((model) => installed.has(model)) || "";
-}
-
-function asrBackendLabel(value) {
-  if (value === "mlx") return "Mac MLX 模型";
-  if (value === "faster-whisper") return "通用模型";
-  return value || "识别模型";
-}
-
-function meetingStatusName(statusValue) {
-  const labels = {
-    recording: "录音中",
-    stopped: "已停止",
-    completed: "已完成",
-    ready: "待开始",
-  };
-  return labels[statusValue] || "待开始";
-}
-
-function serviceStatusText(value) {
-  const labels = {
-    ready: "已连接",
-    starting: "启动中",
-    checking: "检查中",
-    fallback: "可用",
-    offline: "未连接",
-    unknown: "未确认",
-  };
-  return labels[value] || "未确认";
-}
-
-function recognitionStatusText(modelStatus) {
-  if (modelStatus?.loading) return "准备中";
-  if (modelStatus?.loaded) return "已就绪";
-  return "待启用";
-}
-
-function assistantRouteText(llm) {
-  if (!llm?.transport && !llm?.route && !llm?.provider) return "待连接";
-  const route = String(llm?.route || llm?.transport || llm?.provider || "");
-  if (llm?.provider === "openai-chat" || route.includes("openai-chat")) {
-    return llm?.model ? `接口 · ${llm.model}` : "接口";
-  }
-  if (route.includes("web-chat")) return "Codex 通道";
-  return "VibeAround";
-}
-
-function assistantStatusText(llm) {
-  const text = assistantRouteText(llm);
-  if (!text || text === "待连接") return "待配置";
-  return text;
-}
-
-function normalizeLlmConfig(value) {
-  const openaiChat = value?.openai_chat || {};
-  return {
-    provider: value?.provider === "openai-chat" ? "openai-chat" : "vibearound",
-    openai_chat: {
-      base_url: String(openaiChat.base_url || ""),
-      model: String(openaiChat.model || ""),
-      has_api_key: Boolean(openaiChat.has_api_key),
-    },
-  };
-}
-
-function llmDraftFromConfig(value) {
-  const config = normalizeLlmConfig(value);
-  return {
-    provider: config.provider,
-    baseUrl: config.openai_chat.base_url,
-    apiKey: "",
-    model: config.openai_chat.model,
-  };
-}
-
-function promptDraftsFromConfig(value) {
-  const prompts = Array.isArray(value?.prompts) ? value.prompts : [];
-  return Object.fromEntries(prompts.map((item) => [item.key, item.value || item.default || ""]));
-}
-
-function llmProviderLabel(value) {
-  if (value === "openai-chat") return "接口";
-  return "VibeAround";
-}
-
-function speakerStatusText(runtime) {
-  if (runtime?.speaker_tracking?.available) return "可识别";
-  if (runtime?.diarization?.available) return "可区分";
-  return "未启用";
-}
-
-function userFriendlyError(message) {
-  const raw = String(message || "").trim();
-  if (!raw) return "操作没有完成，请稍后重试。";
-
-  let detail = raw;
-  try {
-    const parsed = JSON.parse(raw);
-    if (typeof parsed?.detail === "string") {
-      detail = parsed.detail;
-    } else if (Array.isArray(parsed?.detail)) {
-      detail = parsed.detail.map((item) => item?.msg || item).join("；");
-    }
-  } catch {
-    // Keep the raw message.
-  }
-
-  const lower = detail.toLowerCase();
-  if (lower.includes("meeting not found")) return "找不到这场会议，可能已经被删除。";
-  if (lower.includes("transcript version not found") || lower.includes("source transcript version not found")) {
-    return "找不到这份稿件，请刷新后再试。";
-  }
-  if (lower.includes("segment not found")) return "找不到这段文字，请刷新后再试。";
-  if (lower.includes("speaker not found")) return "当前稿件里没有找到这个说话人。";
-  if (lower.includes("manual edit version") || lower.includes("editable")) {
-    return "请先创建可编辑副本，再修改文字或说话人。";
-  }
-  if (lower.includes("prompt cannot be empty")) return "请输入要生成的内容。";
-  if (lower.includes("no transcript or summary")) return "这场会议还没有可用内容，录音或导入音频后再试。";
-  if (lower.includes("timed out") || lower.includes("timeout")) return "生成时间太久，已停止等待。请稍后重试。";
-  if (lower.includes("empty audio")) return "这段音频为空，请重新录制或导入。";
-  if (lower.includes("unsupported asr language")) return "当前语言暂不支持，请换一种语言设置。";
-  if (lower.includes("asr model is not available locally")) return "本地还没有这套识别资源，请选择已有的识别方式。";
-  if (lower.includes("unsupported asr model")) return "当前识别方式不可用，请换一个选项。";
-  if (lower === "not found" || lower.includes('"not found"')) {
-    return "当前本地语音服务版本过旧，请完全退出旧版 VoiceMeeting 后重新打开。";
-  }
-  if (lower.includes("ffmpeg") || lower.includes("invalid data") || lower.includes("error opening input")) {
-    return "音频文件无法读取，请换一个常见格式，或重新录制。";
-  }
-  if (lower.includes("audio file not found")) return "找不到本地音频文件，可能已经被移动或删除。";
-  if (lower.includes("chunk not found")) return "找不到这段音频，请刷新后再试。";
-  if (lower.includes("web audio") || lower.includes("audio playback") || lower.includes("audio decoding")) {
-    return "当前浏览器不支持这个音频操作，请换一个浏览器或重新导入音频。";
-  }
-  if (
-    lower.includes("notallowederror")
-    || lower.includes("not allowed by the user agent")
-    || lower.includes("permission denied")
-    || lower.includes("permission dismissed")
-    || lower.includes("麦克风权限")
-  ) {
-    return "麦克风权限未开启。请到系统设置的麦克风权限里允许 VoiceMeeting，然后重新开始录音。";
-  }
-  if (lower.includes("playback")) return "回放加载失败，请刷新后再试。";
-  if (lower.includes("vibearound") || lower.includes("bridge") || lower.includes("profile")) {
-    return "会议助手暂时不可用，请确认 VibeAround 正在运行后再试。";
-  }
-  if (/^http\s+\d+/i.test(detail) || /^\d{3}\s/.test(detail)) {
-    return "本地服务返回异常，请稍后重试。";
-  }
-  return detail;
-}
-
-function chunkStageLabel(statusValue) {
-  const labels = {
-    saved: "排队",
-    converting: "准备音频",
-    transcribing: "识别",
-    diarizing: "分辨说话人",
-    identifying_speakers: "匹配说话人",
-    done: "完成",
-    error: "出错",
-  };
-  return labels[statusValue] || statusValue || "待机";
-}
-
-function runtimeLine(runtime, pendingChunks) {
-  const reprocess = runtime?.reprocess;
-  if (reprocess && ["queued", "running"].includes(reprocess.status)) {
-    const total = Number(reprocess.total);
-    const progress = Number(reprocess.progress);
-    const stage = String(reprocess.stage || "处理中");
-    const embedded = stage.match(/^(.*?)(\d+)\s*\/\s*(\d+)\s*$/u);
-    if (embedded) {
-      return `${embedded[1].trim() || "处理中"}：第 ${embedded[2]} / ${embedded[3]} 段`;
-    }
-    if (Number.isFinite(total) && total > 1) {
-      const done = Math.min(total, Math.max(0, progress || 0));
-      return `${stage}：已完成 ${done} / ${total} 段`;
-    }
-    return stage;
-  }
-  const active = runtime?.active_chunks || [];
-  if (pendingChunks > 0 && active.length === 0) return "保存音频中";
-  if (active.length > 0) {
-    const first = active[0];
-    return `第 ${first.seq || active.length} 段 ${chunkStageLabel(first.status)}`;
-  }
-  return "";
-}
-
-function pipelineStepIndex(runtime, pendingChunks, pipelineStatus, finalizing, finalNotesWorking) {
-  const reprocess = runtime?.reprocess;
-  if (reprocess && ["queued", "running"].includes(reprocess.status)) {
-    const level = String(reprocess.level || "");
-    if (level === "notes") return 4;
-    if (level === "speaker") return 3;
-    if (level === "asr") return 2;
-    return -1;
-  }
-
-  const active = runtime?.active_chunks || [];
-  if (active.length > 0) {
-    const statusValue = active[0]?.status;
-    if (statusValue === "saved") return 0;
-    if (statusValue === "converting") return 1;
-    if (statusValue === "transcribing") return 2;
-    if (statusValue === "diarizing" || statusValue === "identifying_speakers") return 3;
-  }
-  if (pendingChunks > 0) return 0;
-
-  if (finalizing || finalNotesWorking) return 4;
-
-  const text = String(pipelineStatus || "");
-  if (text.includes("纪要") || text.includes("生成")) return 4;
-  if (text.includes("说话人")) return 3;
-  if (text.includes("识别")) return 2;
-  if (text.includes("转码") || text.includes("准备音频")) return 1;
-  if (text.includes("上传") || text.includes("整理") || text.includes("录音") || text.includes("保存音频")) return 0;
-  return -1;
-}
-
-function concatFloat32(chunks) {
-  const length = chunks.reduce((total, chunk) => total + chunk.length, 0);
-  const output = new Float32Array(length);
-  let offset = 0;
-  for (const chunk of chunks) {
-    output.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return output;
-}
-
-function writeAscii(view, offset, value) {
-  for (let index = 0; index < value.length; index += 1) {
-    view.setUint8(offset + index, value.charCodeAt(index));
-  }
-}
-
-function encodeWav(samples, sampleRate) {
-  const buffer = new ArrayBuffer(44 + samples.length * 2);
-  const view = new DataView(buffer);
-  writeAscii(view, 0, "RIFF");
-  view.setUint32(4, 36 + samples.length * 2, true);
-  writeAscii(view, 8, "WAVE");
-  writeAscii(view, 12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  writeAscii(view, 36, "data");
-  view.setUint32(40, samples.length * 2, true);
-  let offset = 44;
-  for (let index = 0; index < samples.length; index += 1) {
-    const sample = Math.max(-1, Math.min(1, samples[index]));
-    view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
-    offset += 2;
-  }
-  return new Blob([view], { type: "audio/wav" });
-}
-
-function applyInputGain(input, gain) {
-  const normalizedGain = Number.isFinite(gain) ? Math.min(2.5, Math.max(0.8, gain)) : 1;
-  const frame = new Float32Array(input.length);
-  if (Math.abs(normalizedGain - 1) < 0.001) {
-    frame.set(input);
-    return frame;
-  }
-  for (let index = 0; index < input.length; index += 1) {
-    frame[index] = Math.max(-1, Math.min(1, input[index] * normalizedGain));
-  }
-  return frame;
-}
-
-function compressWaveformBars(values, targetCount = LIVE_WAVEFORM_BAR_COUNT) {
-  if (values.length <= targetCount) return values.slice();
-  return Array.from({ length: targetCount }, (_, index) => {
-    const start = Math.floor(index * values.length / targetCount);
-    const end = Math.max(start + 1, Math.floor((index + 1) * values.length / targetCount));
-    let peak = 0;
-    for (let item = start; item < end; item += 1) {
-      peak = Math.max(peak, values[item] || 0);
-    }
-    return peak;
-  });
-}
-
-function audioBufferToMono(audioBuffer) {
-  const length = audioBuffer.length;
-  const channelCount = audioBuffer.numberOfChannels;
-  const output = new Float32Array(length);
-  for (let channel = 0; channel < channelCount; channel += 1) {
-    const data = audioBuffer.getChannelData(channel);
-    for (let index = 0; index < length; index += 1) {
-      output[index] += data[index] / channelCount;
-    }
-  }
-  return output;
-}
-
-function makeFixedChunks(samples, sampleRate, config = DEFAULT_RECORDING_CONFIG) {
-  const normalized = clampRecordingConfig(config);
-  const maxSamples = Math.round(sampleRate * normalized.maxSegmentMs / 1000);
-  const chunks = [];
-  for (let start = 0; start < samples.length; start += maxSamples) {
-    const end = Math.min(samples.length, start + maxSamples);
-    chunks.push({
-      samples: samples.slice(start, end),
-      startedAtMs: start * 1000 / sampleRate,
-      endedAtMs: end * 1000 / sampleRate,
-      cutReason: "导入固定切片",
-    });
-  }
-  return chunks;
-}
-
-async function api(path, options = {}) {
-  const response = await fetch(`${API_BASE}${path}`, options);
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(userFriendlyError(text || `${response.status} ${response.statusText}`));
-  }
-  return response.json();
-}
-
-function safeDownloadName(value, fallback = "meeting") {
-  return (String(value || fallback)
-    .replace(/[\\/:*?"<>|]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim() || fallback);
-}
-
-async function fetchTextFile(url) {
-  const response = await fetch(url);
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(userFriendlyError(text || `${response.status} ${response.statusText}`));
-  }
-  return response.text();
-}
-
-async function saveTextFile(filename, content) {
-  if (TAURI_AVAILABLE) {
-    const result = await invoke("save_markdown_file", {
-      defaultFilename: filename,
-      content,
-    });
-    return Boolean(result?.saved);
-  }
-
-  const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
-  const objectUrl = window.URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = objectUrl;
-  anchor.download = filename;
-  anchor.style.display = "none";
-  document.body.append(anchor);
-  anchor.click();
-  anchor.remove();
-  window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 1000);
-  return true;
-}
-
-async function requestNativeMicrophonePermission() {
-  if (!TAURI_AVAILABLE) return;
-  try {
-    await invoke("request_microphone_permission");
-  } catch (err) {
-    throw new Error(userFriendlyError(err));
-  }
-}
-
-async function nativeBackendStatus() {
-  if (!TAURI_AVAILABLE) return null;
-  try {
-    return await invoke("backend_status");
-  } catch {
-    return null;
-  }
-}
-
-async function readSse(response, handlers) {
-  if (!response.body) return;
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  const emit = (raw) => {
-    const clean = raw.trim();
-    if (!clean) return;
-    let event = "message";
-    const dataLines = [];
-    for (const line of clean.split("\n")) {
-      if (line.startsWith("event:")) {
-        event = line.slice(6).trim();
-      } else if (line.startsWith("data:")) {
-        dataLines.push(line.slice(5).trimStart());
-      }
-    }
-    const payloadText = dataLines.join("\n");
-    const payload = payloadText ? JSON.parse(payloadText) : {};
-    handlers[event]?.(payload);
-  };
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    buffer = buffer.replace(/\r\n/g, "\n");
-    let boundary = buffer.indexOf("\n\n");
-    while (boundary >= 0) {
-      emit(buffer.slice(0, boundary));
-      buffer = buffer.slice(boundary + 2);
-      boundary = buffer.indexOf("\n\n");
-    }
-  }
-  buffer += decoder.decode();
-  emit(buffer);
-}
-
-function transcriptParts(item) {
-  if (Array.isArray(item?.parts) && item.parts.length > 0) {
-    return item.parts;
-  }
-  return [
-    {
-      id: item?.id,
-      text: item?.text || "",
-      start_ms: item?.start_ms,
-      end_ms: item?.end_ms,
-    },
-  ];
-}
-
-function playbackBounds(chunk) {
-  const startedAtMs = Number(chunk?.started_at_ms);
-  const trimStartMs = Number(chunk?.trim_start_ms);
-  const endedAtMs = Number(chunk?.ended_at_ms);
-  const playableDurationMs = Number(chunk?.playable_duration_ms);
-  const startMs = (Number.isFinite(startedAtMs) ? startedAtMs : 0)
-    + (Number.isFinite(trimStartMs) ? trimStartMs : 0);
-  let endMs = Number.isFinite(playableDurationMs) && playableDurationMs > 0
-    ? startMs + playableDurationMs
-    : endedAtMs;
-  if (!Number.isFinite(endMs) || endMs < startMs) {
-    const durationMs = Number(chunk?.duration_ms);
-    endMs = startMs + (Number.isFinite(durationMs) ? durationMs : 0);
-  }
-  return { startMs, endMs };
-}
-
-function findPlaybackChunkIndex(chunks, startAtMs) {
-  const targetMs = Number.isFinite(startAtMs) ? startAtMs : 0;
-  const containing = chunks.findIndex((chunk) => {
-    const bounds = playbackBounds(chunk);
-    return targetMs >= bounds.startMs && targetMs < bounds.endMs;
-  });
-  if (containing >= 0) return containing;
-  const next = chunks.findIndex((chunk) => playbackBounds(chunk).endMs > targetMs);
-  return next >= 0 ? next : 0;
-}
+import { api, apiUrl, fetchTextFile, readSse, wsUrl } from "@/lib/api-client";
+import { userFriendlyError } from "@/lib/error-messages";
+import {
+  DEFAULT_LLM_CONFIG,
+  llmDraftFromConfig,
+  normalizeLlmConfig,
+  promptDraftsFromConfig,
+} from "@/lib/llm-config";
+import {
+  findPlaybackChunkIndex,
+  notesOnlyMarkdown,
+  pipelineStepIndex,
+  playbackBounds,
+  titleFromAudioFile,
+} from "@/lib/meeting-state";
+import { loadSelectedMicId, saveSelectedMicId } from "@/lib/mic-preferences";
+import { requestNativeMicrophonePermission, safeDownloadName, saveTextFile } from "@/lib/platform-files";
+import {
+  LIVE_WAVEFORM_BAR_COUNT,
+  applyInputGain,
+  audioBufferToMono,
+  compressWaveformBars,
+  concatFloat32,
+  displayMicLevel,
+  encodeWav,
+  makeFixedChunks,
+  shapeLiveWaveLevel,
+} from "@/lib/audio-processing";
+import {
+  ASR_MODEL_ORDER,
+  DEFAULT_RECORDING_CONFIG,
+  MAX_SEGMENT_MS,
+  clampRecordingConfig,
+  loadRecordingConfig,
+  recordingConfigFromServer,
+  recordingConfigToServer,
+  recordingConfigsEqual,
+} from "@/lib/recording-config";
 
 function App() {
   const [meeting, setMeeting] = useState(null);
@@ -748,7 +78,11 @@ function App() {
   const [lastAsr, setLastAsr] = useState(null);
   const [modelStatus, setModelStatus] = useState(null);
   const [modelCatalog, setModelCatalog] = useState(null);
+  const [recordingAsrOptions, setRecordingAsrOptions] = useState([]);
   const [recordingConfig, setRecordingConfig] = useState(loadRecordingConfig);
+  const [recordingConfigDraft, setRecordingConfigDraft] = useState(loadRecordingConfig);
+  const [recordingConfigSaving, setRecordingConfigSaving] = useState(false);
+  const [recordingConfigError, setRecordingConfigError] = useState("");
   const [pipelineStatus, setPipelineStatus] = useState("待机");
   const [llmStatus, setLlmStatus] = useState({ provider: "VibeAround", transport: "local-api" });
   const [llmConfig, setLlmConfig] = useState(DEFAULT_LLM_CONFIG);
@@ -767,6 +101,7 @@ function App() {
   const [propertiesError, setPropertiesError] = useState("");
   const [micDevices, setMicDevices] = useState([]);
   const [selectedMicId, setSelectedMicId] = useState(loadSelectedMicId);
+  const [selectedMicDraftId, setSelectedMicDraftId] = useState(loadSelectedMicId);
   const [activeMicLabel, setActiveMicLabel] = useState("");
   const [vadLevel, setVadLevel] = useState(0);
   const [liveWaveformBars, setLiveWaveformBars] = useState([]);
@@ -809,6 +144,7 @@ function App() {
   const chunkSeqRef = useRef(0);
   const stopRequestedRef = useRef(false);
   const uploadChainRef = useRef(Promise.resolve());
+  const activeUploadControllersRef = useRef(new Set());
   const meetingIdRef = useRef(null);
   const playbackContextRef = useRef(null);
   const playbackSourcesRef = useRef([]);
@@ -820,10 +156,10 @@ function App() {
   const recordingConfigRef = useRef(recordingConfig);
   const liveWaveformRef = useRef([]);
   const liveWaveformEmitRef = useRef(0);
+  const liveWaveformCeilingRef = useRef(0.055);
+  const liveWaveformFloorRef = useRef(0.002);
   const previousSettingsOpenRef = useRef(false);
-  const llmStatusLoadedRef = useRef(false);
   const serviceReadyOnceRef = useRef(false);
-  const startupModelLoadAttemptedRef = useRef(false);
   const autoLoadedMeetingRef = useRef(false);
   const completedReprocessRef = useRef("");
 
@@ -844,6 +180,16 @@ function App() {
   const utterances = meeting?.utterances || [];
   const transcriptItems = utterances.length > 0 ? utterances : segments;
   const chunks = meeting?.chunks || [];
+  const displayRuntimeStatus = useMemo(() => {
+    if (meeting?.status !== "stopped" || !(runtimeStatus?.active_chunks || []).length) {
+      return runtimeStatus;
+    }
+    return {
+      ...runtimeStatus,
+      active_chunks: [],
+      has_active_chunks: false,
+    };
+  }, [meeting?.status, runtimeStatus]);
   const showingPlaybackMeeting = Boolean(meeting?.id && playbackMeetingId === meeting.id);
   const visiblePlaybackPositionMs = showingPlaybackMeeting
     ? playbackPositionMs
@@ -861,6 +207,7 @@ function App() {
   const speakerOptions = useMemo(() => {
     const labels = new Set();
     for (const item of transcriptItems) {
+      if (isUnrecognizedTranscriptItem(item)) continue;
       const label = String(item?.speaker || "").trim();
       if (label) labels.add(label);
     }
@@ -871,16 +218,34 @@ function App() {
     return [...labels].sort((left, right) => left.localeCompare(right, "zh-CN"));
   }, [meeting?.speakers, transcriptItems]);
   const modelCatalogAsr = Array.isArray(modelCatalog?.asr?.models) ? modelCatalog.asr.models : [];
+  const recordingAsrMetaByName = useMemo(() => {
+    const map = new Map();
+    for (const item of recordingAsrOptions || []) {
+      const name = item.name || item.id;
+      if (!name) continue;
+      map.set(name, {
+        kind: "asr",
+        id: name,
+        name,
+        label: item.label || asrModelName(name),
+        backend: item.backend || (name.startsWith("mlx-") ? "mlx" : name.startsWith("funasr-") ? "funasr" : "faster-whisper"),
+        backend_label: item.backend_label || asrBackendLabel(item.backend),
+        installed: Boolean(item.installed),
+      });
+    }
+    return map;
+  }, [recordingAsrOptions]);
   const selectableAsrModels = useMemo(() => {
-    if (!modelCatalogAsr.length) return [];
-    const installedNames = modelCatalogAsr
+    const installedNames = [...recordingAsrMetaByName.values()]
       .filter((item) => item.installed)
-      .map((item) => item.name || item.id)
-      .filter(Boolean);
+      .map((item) => item.name || item.id);
     return ASR_MODEL_ORDER.filter((name) => installedNames.includes(name));
-  }, [modelCatalogAsr]);
+  }, [recordingAsrMetaByName]);
   const modelCatalogByKey = useMemo(() => {
     const map = new Map();
+    for (const item of recordingAsrMetaByName.values()) {
+      map.set(`asr:${item.name || item.id}`, item);
+    }
     for (const item of modelCatalogAsr) {
       map.set(`asr:${item.name || item.id}`, item);
     }
@@ -888,14 +253,14 @@ function App() {
       map.set(`diarization:${item.name || item.id}`, item);
     }
     return map;
-  }, [modelCatalog?.diarization?.models, modelCatalogAsr]);
+  }, [modelCatalog?.diarization?.models, modelCatalogAsr, recordingAsrMetaByName]);
   const asrModelGroups = useMemo(() => {
-    if (!modelCatalogAsr.length) {
-      return [];
-    }
     const groups = [];
-    for (const backend of ["faster-whisper", "mlx"]) {
-      const models = selectableAsrModels.filter((name) => modelCatalogByKey.get(`asr:${name}`)?.backend === backend);
+    for (const backend of ["faster-whisper", "mlx", "funasr"]) {
+      const models = ASR_MODEL_ORDER.filter((name) => {
+        const meta = modelCatalogByKey.get(`asr:${name}`);
+        return (meta?.backend || asrBackendForModel(name)) === backend;
+      });
       if (models.length > 0) {
         groups.push({
           label: asrBackendLabel(backend),
@@ -904,15 +269,15 @@ function App() {
       }
     }
     const grouped = new Set(groups.flatMap((group) => group.models));
-    const remaining = selectableAsrModels.filter((name) => !grouped.has(name));
+    const remaining = ASR_MODEL_ORDER.filter((name) => !grouped.has(name));
     if (remaining.length > 0) {
       groups.push({ label: "其他模型", models: remaining });
     }
     return groups;
-  }, [modelCatalogAsr.length, modelCatalogByKey, selectableAsrModels]);
+  }, [modelCatalogByKey]);
   const modelCatalogAsrGroups = useMemo(() => {
     const groups = [];
-    for (const backend of ["faster-whisper", "mlx"]) {
+    for (const backend of ["faster-whisper", "mlx", "funasr"]) {
       const models = modelCatalogAsr.filter((item) => item.backend === backend);
       if (models.length > 0) {
         groups.push({
@@ -936,8 +301,8 @@ function App() {
   const activeModelDownloadMeta = activeModelDownload
     ? modelCatalogByKey.get(`${activeModelDownload.kind}:${activeModelDownload.model}`)
     : null;
-  const loadedAsrModelMeta = modelCatalogAsr.find((item) => item.loaded) || null;
-  const activeChunks = runtimeStatus?.active_chunks || [];
+  const loadingAsrModelMeta = modelCatalogAsr.find((item) => item.loading) || null;
+  const activeChunks = displayRuntimeStatus?.active_chunks || [];
   const reprocessRuntime = runtimeStatus?.reprocess || null;
   const notesReprocessWorking = (
     reprocessRuntime?.level === "notes" && ["queued", "running"].includes(reprocessRuntime?.status)
@@ -945,31 +310,32 @@ function App() {
   const finalNotesWorking = finalizing || notesReprocessWorking;
   const reprocessWorking = reprocessBusy || ["queued", "running"].includes(reprocessRuntime?.status);
   const asrWorking = pendingChunks > 0 || activeChunks.length > 0 || reprocessWorking;
-  const activePipelineStep = pipelineStepIndex(runtimeStatus, pendingChunks, pipelineStatus, finalizing, finalNotesWorking);
-  const liveRefreshActive = Boolean(
-    recording
-      || pendingChunks > 0
-      || activeChunks.length > 0
-      || reprocessWorking
-      || activeModelDownload,
-  );
+  const activePipelineStep = pipelineStepIndex(displayRuntimeStatus, pendingChunks, pipelineStatus, finalizing, finalNotesWorking);
   const normalizedRecordingConfig = clampRecordingConfig(recordingConfig);
+  const selectedAsrModelMeta = modelCatalogByKey.get(`asr:${normalizedRecordingConfig.asrModel}`);
   const serviceReady = status.backend === "ready";
   const serviceStarting = status.backend === "starting" || status.backend === "checking";
   const modelLoadBusy = modelLoadState?.status === "loading";
+  const modelRuntimeBusy = modelLoadBusy || Boolean(loadingAsrModelMeta) || Boolean(modelStatus?.loading);
   const llmReady = status.vibe === "ready";
   const llmUnavailableReason = llmReady ? "" : status.vibeDetail || "会议助手不可用，请在设置里配置纪要大模型。";
-  const asrReady = serviceReady && Boolean(loadedAsrModelMeta?.loaded || modelStatus?.loaded);
-  const preferredStartupAsrModel = firstInstalledAsrModel(modelCatalogAsr, normalizedRecordingConfig.asrModel);
+  const selectedAsrModelLoaded = Boolean(selectedAsrModelMeta?.loaded)
+    || Boolean(
+      modelStatus?.loaded
+        && [modelStatus.model, modelStatus.runtime_model].filter(Boolean).includes(normalizedRecordingConfig.asrModel),
+    );
+  const asrReady = serviceReady && selectedAsrModelLoaded;
   const asrUnavailableReason = !serviceReady
     ? "本地语音服务还在启动中，请稍候。"
-    : modelLoadBusy
+    : modelRuntimeBusy
       ? "识别模型正在加载，请稍候。"
       : selectableAsrModels.length === 0
         ? "本地还没有可用的识别模型，请先在设置里下载模型。"
         : asrReady
           ? ""
-          : "识别模型尚未加载，请先在设置里加载模型。";
+          : selectedAsrModelMeta?.installed
+            ? "当前录制模型尚未加载成功，请检查模型配置。"
+            : "识别模型尚未加载，请先在设置里加载模型。";
   const servicePillClass = serviceStarting ? "working pulse-pill" : status.backend;
   const trimmedTitle = title.trim();
   const titleDirty = Boolean(meeting?.id && trimmedTitle && trimmedTitle !== meeting.title);
@@ -978,7 +344,6 @@ function App() {
     const normalized = clampRecordingConfig(recordingConfig);
     recordingConfigRef.current = normalized;
     setAsrLanguage(normalized.language);
-    saveRecordingConfig(normalized);
   }, [recordingConfig]);
 
   useEffect(() => {
@@ -988,16 +353,6 @@ function App() {
   useEffect(() => {
     saveLocale(locale);
   }, [locale]);
-
-  useEffect(() => {
-    if (!modelCatalogAsr.length || selectableAsrModels.length === 0) return;
-    const normalized = clampRecordingConfig(recordingConfigRef.current);
-    if (selectableAsrModels.includes(normalized.asrModel)) return;
-    const fallbackModel = selectableAsrModels.includes(DEFAULT_RECORDING_CONFIG.asrModel)
-      ? DEFAULT_RECORDING_CONFIG.asrModel
-      : selectableAsrModels[0];
-    setRecordingConfig({ ...normalized, asrModel: fallbackModel });
-  }, [modelCatalogAsr.length, selectableAsrModels]);
 
   useEffect(() => {
     if (activeModelDownload || pipelineStatus !== "模型下载中") return;
@@ -1062,11 +417,14 @@ function App() {
     const wasOpen = previousSettingsOpenRef.current;
     previousSettingsOpenRef.current = settingsOpen;
     if (!settingsOpen || wasOpen) return;
+    setRecordingConfigDraft(clampRecordingConfig(recordingConfigRef.current));
+    setSelectedMicDraftId(selectedMicId);
+    setRecordingConfigError("");
     setLlmConfigDraft(llmDraftFromConfig(llmConfig));
     setLlmConfigError("");
     setPromptConfigError("");
     if (promptConfig) setPromptDrafts(promptDraftsFromConfig(promptConfig));
-  }, [llmConfig, promptConfig, settingsOpen]);
+  }, [llmConfig, promptConfig, selectedMicId, settingsOpen]);
 
   const applyLlmStatus = useCallback((data) => {
     if (!data) {
@@ -1076,7 +434,7 @@ function App() {
     if (data.config) {
       setLlmConfig(normalizeLlmConfig(data.config));
     }
-    const provider = data.provider === "openai-chat" ? "接口" : "VibeAround";
+    const provider = data.provider === "openai-chat" ? "LLM 模型接口" : "VibeAround";
     setLlmStatus({
       provider: data.provider_label || data.profile_id || provider,
       transport: data.route || data.transport || data.target_api_type || data.provider || "local-api",
@@ -1090,64 +448,30 @@ function App() {
     setPromptDrafts(promptDraftsFromConfig(data));
   }, []);
 
-  const refreshStatus = useCallback(async () => {
-    try {
-      const health = await api("/api/health");
-      if (Number(health?.api_revision || 0) < 2) {
-        throw new Error("当前本地语音服务版本过旧，请完全退出旧版 VoiceMeeting 后重新打开。");
+  const applyRecordingConfigStatus = useCallback((data) => {
+    if (!data) return;
+    if (data.config) {
+      const nextConfig = recordingConfigFromServer(data.config);
+      recordingConfigRef.current = nextConfig;
+      setRecordingConfig(nextConfig);
+      setAsrLanguage(nextConfig.language);
+      if (!settingsOpen) {
+        setRecordingConfigDraft(nextConfig);
       }
-      serviceReadyOnceRef.current = true;
-      setModelStatus(health.asr || null);
-
-      const [catalogResult] = await Promise.allSettled([api("/api/models")]);
-      const catalog = catalogResult.status === "fulfilled" ? catalogResult.value : null;
-      if (catalog) setModelCatalog(catalog);
-	      setStatus((current) => ({
-	        ...current,
-	        backend: "ready",
-	        backendDetail: "",
-	      }));
-	    } catch (err) {
-	      const nativeStatus = await nativeBackendStatus();
-	      const nativeError = String(nativeStatus?.error || "").trim();
-	      const recentLogs = Array.isArray(nativeStatus?.logs)
-	        ? nativeStatus.logs.filter(Boolean).slice(-3).join(" / ")
-	        : "";
-	      const backendDetail = nativeError || recentLogs || err.message;
-	      const backendState = nativeStatus?.status === "error"
-	        ? "offline"
-	        : serviceReadyOnceRef.current
-	          ? "offline"
-	          : "starting";
-	      setStatus((current) => ({
-	        ...current,
-	        backend: backendState,
-	        backendDetail,
-	      }));
-	      setModelStatus(null);
-	      setModelCatalog(null);
-	    }
-  }, []);
-
-  const loadLlmStatus = useCallback(async () => {
-    try {
-      const assistant = await api("/api/llm/status");
-      applyLlmStatus(assistant);
-      setStatus((current) => ({
-        ...current,
-        vibe: assistant?.ok ? "ready" : "fallback",
-        profile: assistant?.profile_id,
-        vibeDetail: assistant?.error || assistant?.status_code,
-      }));
-    } catch (err) {
-      setStatus((current) => ({
-        ...current,
-        vibe: "unknown",
-        vibeDetail: err.message,
-      }));
-      setLlmStatus({ provider: "会议助手", transport: "offline" });
     }
-  }, [applyLlmStatus]);
+    if (Array.isArray(data.asr_options)) setRecordingAsrOptions(data.asr_options);
+    setModelStatus(data.asr || null);
+    if (data.llm) {
+      applyLlmStatus(data.llm);
+      setStatus((current) => ({
+        ...current,
+        vibe: data.llm?.ok ? "ready" : "fallback",
+        profile: data.llm?.profile_id,
+        vibeDetail: data.llm?.error || data.llm?.status_code || "",
+      }));
+    }
+    if (data.load_error) setError(userFriendlyError(data.load_error));
+  }, [applyLlmStatus, settingsOpen]);
 
   const refreshPromptConfig = useCallback(async () => {
     try {
@@ -1185,21 +509,162 @@ function App() {
     }
   }, []);
 
-  const refreshRuntime = useCallback(async (id) => {
-    if (!id) return;
-    try {
-      const data = await api(`/api/meetings/${id}/runtime`);
-      setRuntimeStatus(data);
+  const applyRuntimeStatus = useCallback((data) => {
+    if (!data || data.error) {
+      if (data?.error === "not_found") setRuntimeStatus(null);
+      return;
+    }
+    setRuntimeStatus(data);
+    if (data.llm) {
       setLlmStatus({
         provider: data.llm?.provider_label || llmProviderLabel(data.llm?.provider),
         transport: data.llm?.route || data.llm?.transport || data.llm?.target_api_type || "local-api",
         model: data.llm?.model,
       });
-      setModelStatus(data.asr || null);
-    } catch {
-      setRuntimeStatus(null);
     }
+    if (data.asr) setModelStatus(data.asr);
   }, []);
+
+  useEffect(() => {
+    let socket = null;
+    let reconnectTimer = 0;
+    let closed = false;
+
+    const connect = () => {
+      socket = new WebSocket(wsUrl("/api/status/ws"));
+      socket.onopen = () => {
+        setStatus((current) => ({
+          ...current,
+          backend: serviceReadyOnceRef.current ? "ready" : "checking",
+          backendDetail: "",
+        }));
+      };
+      socket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          serviceReadyOnceRef.current = true;
+          applyRecordingConfigStatus(data);
+          setStatus((current) => ({ ...current, backend: "ready", backendDetail: "" }));
+        } catch (err) {
+          setStatus((current) => ({
+            ...current,
+            backend: serviceReadyOnceRef.current ? "offline" : "starting",
+            backendDetail: userFriendlyError(err.message),
+          }));
+        }
+      };
+      socket.onclose = () => {
+        if (closed) return;
+        setStatus((current) => ({
+          ...current,
+          backend: serviceReadyOnceRef.current ? "offline" : "starting",
+          backendDetail: serviceReadyOnceRef.current ? "状态通道断开，正在自动重连。" : "等待本地语音服务启动。",
+        }));
+        reconnectTimer = window.setTimeout(connect, 1000);
+      };
+      socket.onerror = () => {
+        socket?.close();
+      };
+    };
+
+    connect();
+    return () => {
+      closed = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      socket?.close();
+    };
+  }, [applyRecordingConfigStatus]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api("/api/recording-config")
+      .then((data) => {
+        if (cancelled) return;
+        serviceReadyOnceRef.current = true;
+        applyRecordingConfigStatus(data);
+        setStatus((current) => ({ ...current, backend: "ready", backendDetail: "" }));
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setStatus((current) => ({
+          ...current,
+          backend: serviceReadyOnceRef.current ? "offline" : "starting",
+          backendDetail: userFriendlyError(err.message) || "等待本地语音服务启动。",
+        }));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [applyRecordingConfigStatus]);
+
+  useEffect(() => {
+    const streamModelCatalog = (settingsOpen && settingsTab === "models") || Boolean(activeModelDownload);
+    if (!streamModelCatalog) return undefined;
+    let socket = null;
+    let reconnectTimer = 0;
+    let closed = false;
+
+    const connect = () => {
+      socket = new WebSocket(wsUrl("/api/models/ws"));
+      socket.onmessage = (event) => {
+        try {
+          setModelCatalog(JSON.parse(event.data));
+        } catch {
+          // Keep the previous catalog; the socket will continue streaming changes.
+        }
+      };
+      socket.onclose = () => {
+        if (closed) return;
+        reconnectTimer = window.setTimeout(connect, 1500);
+      };
+      socket.onerror = () => {
+        socket?.close();
+      };
+    };
+
+    connect();
+    return () => {
+      closed = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      socket?.close();
+    };
+  }, [activeModelDownload?.id, settingsOpen, settingsTab]);
+
+  useEffect(() => {
+    const id = meeting?.id;
+    if (!id) {
+      setRuntimeStatus(null);
+      return undefined;
+    }
+    let socket = null;
+    let reconnectTimer = 0;
+    let closed = false;
+
+    const connect = () => {
+      socket = new WebSocket(wsUrl(`/api/meetings/${encodeURIComponent(id)}/runtime/ws`));
+      socket.onmessage = (event) => {
+        try {
+          applyRuntimeStatus(JSON.parse(event.data));
+        } catch {
+          // Runtime updates are continuous; keep the last known state.
+        }
+      };
+      socket.onclose = () => {
+        if (closed) return;
+        reconnectTimer = window.setTimeout(connect, 1000);
+      };
+      socket.onerror = () => {
+        socket?.close();
+      };
+    };
+
+    connect();
+    return () => {
+      closed = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      socket?.close();
+    };
+  }, [applyRuntimeStatus, meeting?.id]);
 
   const downloadModel = useCallback(async (kind, model) => {
     if (!kind || !model) return null;
@@ -1233,117 +698,81 @@ function App() {
         method: "DELETE",
       });
       setModelCatalog(catalog || null);
-      await refreshStatus();
     } catch (err) {
       setError(userFriendlyError(err.message));
     }
-  }, [modelCatalogByKey, refreshStatus]);
+  }, [modelCatalogByKey]);
 
-  const updateRecordingConfig = useCallback((field, value) => {
-    setRecordingConfig((current) => {
-      const next = clampRecordingConfig({ ...current, [field]: value });
-      return next;
-    });
+  const updateRecordingConfigDraft = useCallback((field, value) => {
+    setRecordingConfigError("");
+    setRecordingConfigDraft((current) => clampRecordingConfig({ ...current, [field]: value }));
   }, []);
 
-  const loadRecordingAsrModel = useCallback(
-    async (model, options = {}) => {
-      const cleanModel = String(model || "").trim();
-      const startup = options.source === "startup";
-      if (!cleanModel || modelLoadState?.status === "loading") return;
-      if (!startup && (recording || busy || importingAudio)) return;
-      const targetMeta = modelCatalogByKey.get(`asr:${cleanModel}`);
-      if (targetMeta && !targetMeta.installed) {
-        const message = "本地还没有这套识别资源，请先下载模型。";
-        setError(message);
-        setModelLoadState({
-          status: "error",
-          source: options.source || "switch",
-          targetModel: cleanModel,
-          targetLabel: targetMeta.label || asrModelName(cleanModel),
-          previousLabel: "",
-          error: message,
-        });
-        return;
-      }
-      if (!startup && loadedAsrModelMeta?.name === cleanModel && loadedAsrModelMeta?.loaded) {
-        setRecordingConfig((current) => clampRecordingConfig({ ...current, asrModel: cleanModel }));
-        return;
-      }
-      const targetLabel = targetMeta?.label || asrModelName(cleanModel);
-      const previousLabel = loadedAsrModelMeta && loadedAsrModelMeta.name !== cleanModel
-        ? loadedAsrModelMeta.label || asrModelName(loadedAsrModelMeta.name)
-        : "";
-      setError("");
+  const saveRecordingConfig = useCallback(async (event) => {
+    event.preventDefault();
+    if (recordingConfigSaving || recording) return;
+    const current = clampRecordingConfig(recordingConfigRef.current);
+    const next = clampRecordingConfig(recordingConfigDraft);
+    const modelChanged = next.asrModel !== current.asrModel;
+    setRecordingConfigSaving(true);
+    setRecordingConfigError("");
+    setError("");
+    if (modelChanged) {
       setModelLoadState({
         status: "loading",
-        source: options.source || "switch",
-        targetModel: cleanModel,
-        targetLabel,
-        previousLabel,
+        source: "settings",
+        targetModel: next.asrModel,
+        targetLabel: asrModelName(next.asrModel),
+        previousLabel: asrModelName(current.asrModel),
       });
-      try {
-        const result = await api("/api/models/load", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ kind: "asr", model: cleanModel }),
-        });
-        if (result.catalog) setModelCatalog(result.catalog);
-        setRecordingConfig((current) => clampRecordingConfig({ ...current, asrModel: cleanModel }));
-        setModelStatus(result.status || null);
-        setPipelineStatus(`${targetLabel} 已加载`);
+    }
+    try {
+      if (selectedMicDraftId !== selectedMicId) {
+        selectMicDevice(selectedMicDraftId);
+      }
+      const data = await api("/api/recording-config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(recordingConfigToServer(next)),
+      });
+      applyRecordingConfigStatus(data);
+      const saved = data.config ? recordingConfigFromServer(data.config) : next;
+      setRecordingConfigDraft(saved);
+      setPipelineStatus("录制配置已保存");
+      if (modelChanged) {
         setModelLoadState({
           status: "success",
-          source: options.source || "switch",
-          targetModel: cleanModel,
-          targetLabel: result.label || targetLabel,
-          previousLabel: (result.unloaded || [])[0]?.label || previousLabel,
+          source: "settings",
+          targetModel: next.asrModel,
+          targetLabel: asrModelName(next.asrModel),
+          previousLabel: asrModelName(current.asrModel),
         });
-        await refreshStatus();
-        if (options.autoClose) {
-          window.setTimeout(() => {
-            setModelLoadState((current) => (
-              current?.status === "success" && current?.targetModel === cleanModel ? null : current
-            ));
-          }, 650);
-        }
-      } catch (err) {
-        const message = userFriendlyError(err.message);
-        setError(message);
+      }
+    } catch (err) {
+      const message = userFriendlyError(err.message);
+      setRecordingConfigError(message);
+      setError(message);
+      if (modelChanged) {
         setModelLoadState({
           status: "error",
-          source: options.source || "switch",
-          targetModel: cleanModel,
-          targetLabel,
-          previousLabel,
+          source: "settings",
+          targetModel: next.asrModel,
+          targetLabel: asrModelName(next.asrModel),
+          previousLabel: asrModelName(current.asrModel),
           error: message,
         });
       }
-    },
-    [busy, importingAudio, loadedAsrModelMeta, modelCatalogByKey, modelLoadState?.status, recording, refreshStatus],
-  );
-
-  useEffect(() => {
-    if (!serviceReady || startupModelLoadAttemptedRef.current || modelLoadBusy) return;
-    if (!modelCatalogAsr.length) return;
-    if (loadedAsrModelMeta?.loaded) {
-      startupModelLoadAttemptedRef.current = true;
-      return;
+    } finally {
+      setRecordingConfigSaving(false);
     }
-    startupModelLoadAttemptedRef.current = true;
-    if (!preferredStartupAsrModel) {
-      setPipelineStatus("识别模型未安装");
-      setError("本地还没有可用的识别模型，请先在设置里下载模型。");
-      return;
-    }
-    loadRecordingAsrModel(preferredStartupAsrModel, { source: "startup", autoClose: true });
   }, [
-    loadRecordingAsrModel,
-    loadedAsrModelMeta?.loaded,
-    modelCatalogAsr.length,
-    modelLoadBusy,
-    preferredStartupAsrModel,
-    serviceReady,
+    applyRecordingConfigStatus,
+    recording,
+    recordingConfigDraft,
+    recordingConfigSaving,
+    selectMicDevice,
+    selectedMicDraftId,
+    selectedMicId,
   ]);
 
   const updateAppearance = useCallback((field, value) => {
@@ -1453,16 +882,16 @@ function App() {
   }, []);
 
   const missingModelsForConfig = useCallback((config) => (
-    modelCatalog
+    (modelCatalog || recordingAsrMetaByName.size > 0)
       ? requiredModelsForConfig(config).filter((item) => {
         const meta = modelCatalogByKey.get(`${item.kind}:${item.model}`);
         return !meta?.installed;
       })
       : []
-  ), [modelCatalog, modelCatalogByKey, requiredModelsForConfig]);
+  ), [modelCatalog, modelCatalogByKey, recordingAsrMetaByName.size, requiredModelsForConfig]);
 
-  const ensureRecordingModels = useCallback(async () => {
-    const missing = missingModelsForConfig(recordingConfigRef.current);
+  const ensureRecordingModels = useCallback(async (config = recordingConfigRef.current) => {
+    const missing = missingModelsForConfig(config);
     if (missing.length === 0) return true;
     const names = missing.map((item) => {
       const meta = modelCatalogByKey.get(`${item.kind}:${item.model}`);
@@ -1569,12 +998,34 @@ function App() {
           method: "POST",
         });
         setMeeting(updated);
-        await refreshRuntime(id);
       } catch (err) {
         setError(userFriendlyError(err.message));
       }
     },
-    [meeting?.active_version_id, meeting?.id, refreshRuntime],
+    [meeting?.active_version_id, meeting?.id],
+  );
+
+  const deleteTranscriptVersion = useCallback(
+    async (versionId) => {
+      const id = meeting?.id;
+      if (!id || !versionId || versionId === "auto") return;
+      const version = (meeting?.transcript_versions || []).find((item) => item.id === versionId);
+      if (["queued", "running"].includes(version?.status)) return;
+      const label = transcriptVersionOption(version || { id: versionId });
+      if (!window.confirm(`删除稿件：${label}？`)) return;
+      setError("");
+      try {
+        const updated = await api(`/api/meetings/${id}/versions/${encodeURIComponent(versionId)}`, {
+          method: "DELETE",
+        });
+        setMeeting(updated);
+        setPipelineStatus("稿件已删除");
+        await refreshMeetings();
+      } catch (err) {
+        setError(userFriendlyError(err.message));
+      }
+    },
+    [meeting?.id, meeting?.transcript_versions, refreshMeetings],
   );
 
   const startReprocess = useCallback(
@@ -1582,7 +1033,7 @@ function App() {
       const id = meeting?.id;
       if (!id || reprocessBusy) return;
       if (level === "asr" && !asrReady) {
-        setError(asrUnavailableReason || "识别模型尚未加载，请先在设置里加载模型。");
+        setError(asrUnavailableReason || "识别模型尚未加载成功，请检查模型配置。");
         setSettingsTab("recording");
         setSettingsOpen(true);
         return;
@@ -1627,7 +1078,6 @@ function App() {
           await refreshMeeting(id);
           await refreshMeetings();
         }
-        await refreshRuntime(id);
       } catch (err) {
         setPipelineStatus("处理失败");
         setError(userFriendlyError(err.message));
@@ -1644,7 +1094,6 @@ function App() {
       llmUnavailableReason,
       refreshMeeting,
       refreshMeetings,
-      refreshRuntime,
       reprocessBusy,
     ],
   );
@@ -1662,18 +1111,18 @@ function App() {
       });
       setMeeting(updated);
       setPipelineStatus("已创建可编辑副本");
-      await refreshRuntime(id);
       await refreshMeetings();
     } catch (err) {
       setError(userFriendlyError(err.message));
     } finally {
       setEditBusy(false);
     }
-  }, [editBusy, meeting?.active_version_id, meeting?.id, refreshMeetings, refreshRuntime]);
+  }, [editBusy, meeting?.active_version_id, meeting?.id, refreshMeetings]);
 
   const startEditSegment = useCallback(
     (event, segment) => {
       event.stopPropagation();
+      if (isUnrecognizedTranscriptItem(segment)) return;
       if (!editableVersion) {
         setError("请先创建可编辑副本，再修改文字。");
         return;
@@ -1843,36 +1292,23 @@ function App() {
   );
 
   useEffect(() => {
-    refreshStatus();
     refreshMeetings();
-  }, [refreshMeetings, refreshStatus]);
-
-  useEffect(() => {
-    if (!liveRefreshActive) return undefined;
-    const tick = () => {
-      refreshStatus();
-      refreshMeetings();
-      if (meetingIdRef.current) {
-        refreshMeeting(meetingIdRef.current);
-        refreshRuntime(meetingIdRef.current);
-      }
-    };
-    tick();
-    const interval = window.setInterval(() => {
-      tick();
-    }, 1000);
-    return () => window.clearInterval(interval);
-  }, [liveRefreshActive, refreshMeeting, refreshMeetings, refreshRuntime, refreshStatus]);
+  }, [refreshMeetings]);
 
   useEffect(() => {
     const job = runtimeStatus?.reprocess;
     const id = meeting?.id;
-    if (!id || !job || job.status !== "done") return;
-    const key = `${id}:${job.id || ""}:${job.version_id || ""}:${job.updated_at || ""}`;
+    if (!id || !job || !["done", "error"].includes(job.status)) return;
+    const key = `${id}:${job.id || ""}:${job.version_id || ""}:${job.status || ""}:${job.updated_at || ""}`;
     if (completedReprocessRef.current === key) return;
     completedReprocessRef.current = key;
     refreshMeeting(id);
     refreshMeetings();
+    if (job.status === "error") {
+      setPipelineStatus("处理失败");
+      setError(userFriendlyError(job.error));
+      return;
+    }
     const doneLabels = {
       asr: "重新识别已完成",
       speaker: "说话人校准已完成",
@@ -1883,19 +1319,15 @@ function App() {
     setPipelineStatus(doneLabels[job.level] || "处理已完成");
   }, [meeting?.id, refreshMeeting, refreshMeetings, runtimeStatus?.reprocess]);
 
-  useEffect(() => {
-    if (llmStatusLoadedRef.current) return;
-    llmStatusLoadedRef.current = true;
-    loadLlmStatus();
-  }, [loadLlmStatus]);
-
   const uploadChunk = useCallback(
     async (blob, durationMs = MAX_SEGMENT_MS, metadata = {}) => {
       const id = meetingIdRef.current;
       if (!id || !blob || blob.size === 0) return;
       const activeConfig = clampRecordingConfig(recordingConfigRef.current);
+      const controller = new AbortController();
+      activeUploadControllersRef.current.add(controller);
       setPendingChunks((value) => value + 1);
-      setPipelineStatus(modelStatus?.loaded ? "保存音频" : "准备语音识别");
+      setPipelineStatus(asrReady ? "保存音频" : "准备语音识别");
       setError("");
       const form = new FormData();
       const extension = blob.type.includes("wav")
@@ -1920,6 +1352,7 @@ function App() {
         const data = await api(`/api/meetings/${id}/chunks`, {
           method: "POST",
           body: form,
+          signal: controller.signal,
         });
         setLastAsr(data.asr || null);
         if (data.runtime) setRuntimeStatus(data.runtime);
@@ -1935,13 +1368,18 @@ function App() {
           };
         });
       } catch (err) {
+        if (err?.name === "AbortError") {
+          setPipelineStatus("已停止");
+          return;
+        }
         setPipelineStatus("处理失败");
         setError(userFriendlyError(err.message));
       } finally {
+        activeUploadControllersRef.current.delete(controller);
         setPendingChunks((value) => Math.max(0, value - 1));
       }
     },
-    [modelStatus?.loaded],
+    [asrReady],
   );
 
   const enqueueChunk = useCallback(
@@ -1989,8 +1427,12 @@ function App() {
       const activeConfig = clampRecordingConfig(recordingConfigRef.current);
       const frame = applyInputGain(input, activeConfig.inputGain);
       let sum = 0;
+      let peak = 0;
       for (let index = 0; index < frame.length; index += 1) {
-        sum += frame[index] * frame[index];
+        const sample = frame[index];
+        const abs = Math.abs(sample);
+        peak = Math.max(peak, abs);
+        sum += sample * sample;
       }
       const level = Math.sqrt(sum / frame.length);
       setVadLevel(level);
@@ -1998,7 +1440,7 @@ function App() {
       const startMs = totalSamplesRef.current * 1000 / audioSampleRateRef.current;
       totalSamplesRef.current += frame.length;
       const endMs = totalSamplesRef.current * 1000 / audioSampleRateRef.current;
-      const shapedLevel = Math.max(0.025, Math.min(1, Math.pow(Math.max(0, level * 24), 0.72)));
+      const shapedLevel = shapeLiveWaveLevel(level, peak, liveWaveformCeilingRef, liveWaveformFloorRef);
       liveWaveformRef.current.push(shapedLevel);
       if (liveWaveformRef.current.length > LIVE_WAVEFORM_BAR_COUNT * 8) {
         liveWaveformRef.current = liveWaveformRef.current.slice(-LIVE_WAVEFORM_BAR_COUNT * 8);
@@ -2033,7 +1475,7 @@ function App() {
       return;
     }
     if (!asrReady) {
-      setError(asrUnavailableReason || "识别模型尚未加载，请先在设置里加载模型。");
+      setError(asrUnavailableReason || "识别模型尚未加载成功，请检查模型配置。");
       setSettingsTab("recording");
       setSettingsOpen(true);
       return;
@@ -2062,6 +1504,8 @@ function App() {
       setLiveRecordingMs(0);
       liveWaveformRef.current = [];
       liveWaveformEmitRef.current = 0;
+      liveWaveformCeilingRef.current = 0.055;
+      liveWaveformFloorRef.current = 0.002;
       setPipelineStatus("录音中");
       await refreshMeetings();
 
@@ -2134,6 +1578,8 @@ function App() {
       setBusy(false);
     }
   }, [
+    asrReady,
+    asrUnavailableReason,
     busy,
     ensureRecordingModels,
     handleAudioFrame,
@@ -2143,8 +1589,6 @@ function App() {
     refreshMicDevices,
     selectMicDevice,
     selectedMicId,
-    asrReady,
-    asrUnavailableReason,
     serviceReady,
   ]);
 
@@ -2166,7 +1610,7 @@ function App() {
     try {
       await uploadChainRef.current;
       setPipelineStatus("最终纪要生成中");
-      const response = await fetch(`${API_BASE}/api/meetings/${id}/finalize/stream`, {
+      const response = await fetch(apiUrl(`/api/meetings/${id}/finalize/stream`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ force_local: false }),
@@ -2243,6 +1687,11 @@ function App() {
     setActiveMicLabel("");
     setVadLevel(0);
     setPipelineStatus("已停止");
+    setRuntimeStatus((current) => (
+      current
+        ? { ...current, active_chunks: [], has_active_chunks: false }
+        : current
+    ));
     const stoppedMeetingId = meetingIdRef.current;
     if (stoppedMeetingId) {
       try {
@@ -2250,9 +1699,16 @@ function App() {
       } catch {
         // The local state still carries the recording outcome.
       }
+      try {
+        await uploadChainRef.current;
+        await refreshMeeting(stoppedMeetingId);
+        await refreshMeetings();
+      } catch (err) {
+        setError(userFriendlyError(err.message));
+      }
       await runFinalize(stoppedMeetingId, { allowWhileRecording: true });
     }
-  }, [closeActiveSegment, recording, runFinalize]);
+  }, [closeActiveSegment, recording, refreshMeeting, refreshMeetings, runFinalize]);
 
   const finalize = useCallback(async () => {
     const id = meetingIdRef.current || meeting?.id;
@@ -2263,9 +1719,8 @@ function App() {
     async (id) => {
       meetingIdRef.current = id;
       await refreshMeeting(id);
-      await refreshRuntime(id);
     },
-    [refreshMeeting, refreshRuntime],
+    [refreshMeeting],
   );
 
   useEffect(() => {
@@ -2386,7 +1841,7 @@ function App() {
     const cached = playbackCacheRef.current.get(key);
     if (cached) return cached;
 
-    const response = await fetch(`${API_BASE}${chunk.audio_url}`);
+    const response = await fetch(apiUrl(chunk.audio_url));
     if (!response.ok) {
       throw new Error(`回放加载失败：${response.status}`);
     }
@@ -2575,16 +2030,17 @@ function App() {
         return;
       }
       if (!asrReady) {
-        setError(asrUnavailableReason || "识别模型尚未加载，请先在设置里加载模型。");
+        setError(asrUnavailableReason || "识别模型尚未加载成功，请检查模型配置。");
         setSettingsTab("recording");
         setSettingsOpen(true);
         return;
       }
       setError("");
-      setImportingAudio(true);
       setPipelineStatus("准备导入音频");
       try {
         if (!(await ensureRecordingModels())) return;
+        setImportingAudio(true);
+        stopRequestedRef.current = false;
         const importedTitle = titleFromAudioFile(file);
         let id = null;
         if (!id) {
@@ -2621,7 +2077,6 @@ function App() {
           });
         }
         await refreshMeeting(id);
-        await refreshRuntime(id);
         await refreshMeetings();
       } catch (err) {
         setPipelineStatus("导入失败");
@@ -2639,7 +2094,6 @@ function App() {
       recording,
       refreshMeeting,
       refreshMeetings,
-      refreshRuntime,
       serviceReady,
     ],
   );
@@ -2650,7 +2104,7 @@ function App() {
       if (!id || downloadBusy) return;
       const titleBase = safeDownloadName(meeting?.title || "今天的会议");
       const isTranscript = kind === "transcript";
-      const url = `${API_BASE}/api/meetings/${id}/${isTranscript ? "transcript.md" : "export.md"}`;
+      const url = apiUrl(`/api/meetings/${id}/${isTranscript ? "transcript.md" : "export.md"}`);
       const filename = isTranscript ? `${titleBase}-逐字稿.md` : `${titleBase}.md`;
       setDownloadBusy(kind);
       setError("");
@@ -2671,8 +2125,11 @@ function App() {
   const downloadTranscript = useCallback(() => downloadMeetingFile("transcript"), [downloadMeetingFile]);
   const downloadNotes = useCallback(() => downloadMeetingFile("notes"), [downloadMeetingFile]);
 
-  const micLevel = Math.min(1, Math.max(0.08, vadLevel * 18));
-  const missingRecordingModels = missingModelsForConfig(recordingConfig);
+  const micLevel = displayMicLevel(vadLevel);
+  const normalizedRecordingConfigDraft = clampRecordingConfig(recordingConfigDraft);
+  const recordingConfigDirty = !recordingConfigsEqual(recordingConfig, recordingConfigDraft)
+    || selectedMicDraftId !== selectedMicId;
+  const missingRecordingModels = missingModelsForConfig(recordingConfigDraft);
   const maxSegmentSeconds = Math.round(normalizedRecordingConfig.maxSegmentMs / 1000);
   const selectedMicDeviceIndex = micDevices.findIndex((device) => device.deviceId === selectedMicId);
   const selectedMicLabel = selectedMicDeviceIndex >= 0
@@ -2682,12 +2139,9 @@ function App() {
       : "系统默认麦克风";
   const currentMicLabel = activeMicLabel || selectedMicLabel;
   const currentInputGainLabel = inputGainName(normalizedRecordingConfig.inputGain);
-  const activeAsrModelMeta = modelCatalogByKey.get(`asr:${normalizedRecordingConfig.asrModel}`);
-  const recordingAsrModelValue = selectableAsrModels.includes(recordingConfig.asrModel)
-    ? recordingConfig.asrModel
-    : "";
+  const recordingAsrModelValue = normalizedRecordingConfigDraft.asrModel;
   const currentRecordingSummary = [
-    activeAsrModelMeta?.label || asrModelName(normalizedRecordingConfig.asrModel),
+    selectedAsrModelMeta?.label || asrModelName(normalizedRecordingConfig.asrModel),
     languageName(normalizedRecordingConfig.language),
     speakerModeName(normalizedRecordingConfig.speakerMode),
   ].join(" · ");
@@ -2749,7 +2203,7 @@ function App() {
         stopRecording={stopRecording}
         uploadAudioFile={uploadAudioFile}
         pipelineStatus={pipelineStatus}
-        runtimeStatus={runtimeStatus}
+        runtimeStatus={displayRuntimeStatus}
         pendingChunks={pendingChunks}
         micLevel={micLevel}
         currentMicLabel={currentMicLabel}
@@ -2771,9 +2225,10 @@ function App() {
           chunkCount={chunks.length}
           status={status}
           llmStatus={llmStatus}
+          modelStatus={modelStatus}
           servicePillClass={servicePillClass}
           asrWorking={asrWorking}
-          runtimeStatus={runtimeStatus}
+          runtimeStatus={displayRuntimeStatus}
           pendingChunks={pendingChunks}
           activeModelDownload={activeModelDownload}
           activeModelDownloadMeta={activeModelDownloadMeta}
@@ -2789,7 +2244,6 @@ function App() {
           serviceReady={serviceReady}
           serviceStarting={serviceStarting}
           backendDetail={status.backendDetail}
-          onRefresh={refreshStatus}
         />
 
         <MeetingTimeline
@@ -2814,6 +2268,7 @@ function App() {
             transcriptVersions={meeting?.transcript_versions || []}
             activeVersionId={meeting?.active_version_id || "auto"}
             activateTranscriptVersion={activateTranscriptVersion}
+            deleteTranscriptVersion={deleteTranscriptVersion}
             lastAsr={lastAsr}
             asrLanguage={asrLanguage}
             downloadTranscript={downloadTranscript}
@@ -2826,7 +2281,7 @@ function App() {
             createEditableVersion={createEditableVersion}
             error={error}
             asrWorking={asrWorking}
-            runtimeStatus={runtimeStatus}
+            runtimeStatus={displayRuntimeStatus}
             pendingChunks={pendingChunks}
             transcriptItems={transcriptItems}
             onOpenMeetingProperties={openMeetingProperties}
@@ -2869,18 +2324,21 @@ function App() {
         settingsTab={settingsTab}
         setSettingsTab={setSettingsTab}
         missingRecordingModels={missingRecordingModels}
-        selectedMicId={selectedMicId}
-        selectMicDevice={selectMicDevice}
+        selectedMicId={selectedMicDraftId}
+        selectMicDevice={setSelectedMicDraftId}
         recording={recording}
         micDevices={micDevices}
         recordingAsrModelValue={recordingAsrModelValue}
-        updateRecordingConfig={updateRecordingConfig}
-        loadRecordingAsrModel={loadRecordingAsrModel}
-        modelLoading={modelLoadState?.status === "loading"}
+        updateRecordingConfig={updateRecordingConfigDraft}
+        saveRecordingConfig={saveRecordingConfig}
+        recordingConfigSaving={recordingConfigSaving}
+        recordingConfigDirty={recordingConfigDirty}
+        recordingConfigError={recordingConfigError}
+        modelLoading={modelLoadState?.status === "loading" || recordingConfigSaving}
         selectableAsrModels={selectableAsrModels}
         asrModelGroups={asrModelGroups}
         modelCatalogByKey={modelCatalogByKey}
-        recordingConfig={recordingConfig}
+        recordingConfig={recordingConfigDraft}
         ensureRecordingModels={ensureRecordingModels}
         activeModelDownload={activeModelDownload}
         saveLlmConfig={saveLlmConfig}
@@ -2896,7 +2354,6 @@ function App() {
         resetPromptDraft={resetPromptDraft}
         savePromptConfig={savePromptConfig}
         refreshPromptConfig={refreshPromptConfig}
-        refreshStatus={refreshStatus}
         modelCatalogAsrGroups={modelCatalogAsrGroups}
         modelCatalog={modelCatalog}
         downloadModel={downloadModel}

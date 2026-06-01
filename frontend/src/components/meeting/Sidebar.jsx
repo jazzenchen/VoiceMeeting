@@ -1,4 +1,5 @@
 import {
+  AlertCircle,
   FileAudio,
   Mic,
   Pause,
@@ -164,7 +165,7 @@ export function Sidebar({
             </label>
             {recordingUnavailable && serviceReady && !processing && !importingAudio && (
               <div className="proc-mini warn">
-                <span className="spin" />
+                <AlertCircle size={13} />
                 <span className="label">{recordingUnavailable}</span>
               </div>
             )}
@@ -218,8 +219,10 @@ export function Sidebar({
             >
               <button className="rail-open" type="button" onClick={() => loadMeeting(item.id)}>
                 <span className="title">{item.title}</span>
-                <span className="meta">{formatDateTime(item.created_at)}</span>
-                <span className="badges">{isPlaybackOwner ? playbackMeta : isActive ? activeMeetingMeta(meeting, t) : meetingMeta(item, t)}</span>
+                <span className="meta-line">
+                  <span className="meta">{formatDateTime(item.created_at)}</span>
+                  <span className="badges">{isPlaybackOwner ? playbackMeta : isActive ? activeMeetingMeta(meeting, t) : meetingMeta(item, t)}</span>
+                </span>
               </button>
             </li>
           );

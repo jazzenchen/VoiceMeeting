@@ -3,6 +3,7 @@ import { Languages, Moon, Settings, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   WAVE_PATTERN,
+  asrModelName,
   assistantStatusText,
   formatOffset,
   meetingStatusName,
@@ -26,12 +27,29 @@ function serviceCompactText(value) {
   return serviceStatusText(value);
 }
 
+function asrStatusText(modelStatus, t) {
+  if (!modelStatus) return "";
+  const model = modelStatus.label
+    || asrModelName(modelStatus.model || modelStatus.runtime_model || modelStatus.configured_model || "");
+  if (modelStatus.loading) {
+    return model ? `${t("文字识别")} · ${model} ${t("加载中")}` : `${t("文字识别")} · ${t("加载中")}`;
+  }
+  if (modelStatus.loaded) {
+    return model ? `${t("文字识别")} · ${model}` : "";
+  }
+  if (modelStatus.last_error || modelStatus.load_error) {
+    return `${t("文字识别")} · ${t("模型加载失败")}`;
+  }
+  return model ? `${t("文字识别")} · ${model}` : "";
+}
+
 export function TopBar({
   meeting,
   transcriptCount,
   chunkCount,
   status,
   llmStatus,
+  modelStatus,
   servicePillClass,
   asrWorking,
   runtimeStatus,
@@ -61,6 +79,14 @@ export function TopBar({
       .map((item) => item?.speaker)
       .filter(Boolean),
   ).size;
+  const asrPillText = asrStatusText(modelStatus, t);
+  const asrPillClass = modelStatus?.loading
+    ? "working pulse-pill"
+    : modelStatus?.loaded
+      ? "ready"
+      : (modelStatus?.last_error || modelStatus?.load_error)
+        ? "offline"
+        : "unknown";
 
   return (
     <header className="topbar">
@@ -78,7 +104,10 @@ export function TopBar({
       <div className="topbar-actions">
         <div className="status-strip">
           <span className={`pill ${servicePillClass}`}>{t("本地服务")} · {t(serviceCompactText(status.backend))}</span>
-          <span className={`pill ${status.vibe}`}>{compactStatusText(assistantStatusText(llmStatus)).replace(/^接口\s*·\s*/u, "接口 ")}</span>
+          {asrPillText && <span className={`pill ${asrPillClass}`}>{asrPillText}</span>}
+          <span className={`pill ${status.vibe}`}>
+            {compactStatusText(assistantStatusText(llmStatus)).replace(/^LLM 模型接口\s*·\s*/u, "LLM 模型接口 ")}
+          </span>
           {asrWorking && <span className="pill working pulse-pill">{runtimeLine(runtimeStatus, pendingChunks, t)}</span>}
           {activeModelDownload && (
             <span className="pill working">

@@ -1,42 +1,64 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import mimetypes
-import os
-import platform
-import re
-import shutil
-import subprocess
-import threading
 import time
 import uuid
-import wave
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
-from pydantic import BaseModel, Field
-
-from .asr import ASRUnavailable, FasterWhisperASR, MLX_MODEL_REPOS, MlxWhisperASR
+from .api.schemas import (
+    CreateEditableVersionRequest,
+    CreateMeetingRequest,
+    CreateVersionRequest,
+    FinalizeRequest,
+    LLMConfigRequest,
+    MeetingAskRequest,
+    ModelDownloadRequest,
+    PromptConfigRequest,
+    RecordingConfigRequest,
+    RenameSpeakerRequest,
+    ReprocessRequest,
+    UpdateMeetingRequest,
+    UpdateSegmentRequest,
+)
+from .asr import ASRUnavailable
+from .asr_runtime import ASRRuntime
 from .config import (
-    ALLOW_MODEL_DOWNLOAD,
     ASR_MODEL,
     ASR_MODEL_DIR,
-    MLX_ASR_MODEL_DIR,
-    MODELS_DIR,
     PROJECT_DIR,
     ensure_runtime_dirs,
 )
 from .diarization import DiarizationUnavailable, PyannoteDiarizer, assign_speakers
 from .llm import LLMManager
-from .media_tools import ffprobe_path
+from .model_registry import (
+    ASR_MODEL_CATALOG,
+    FUNASR_MODEL_CATALOG,
+    FUNASR_MODEL_DIR,
+    MAC_MLX_ENABLED,
+    MLX_ASR_MODEL_CATALOG,
+    MLX_ASR_MODEL_DIR,
+    MODELS_DIR,
+    PYANNOTE_COMMUNITY_MODEL_ID,
+    PYANNOTE_COMMUNITY_REPO_ID,
+    PYANNOTE_MODEL_DIR,
+    SUPPORTED_ASR_MODELS,
+    asr_model_cache_path,
+    asr_model_repos,
+    directory_size_bytes,
+    discovered_asr_models,
+    local_pyannote_model_path,
+)
+from .model_downloads import ModelDownloadManager
 from .prompt_settings import PromptConfigStore
+from .recording_config import RecordingConfigStore
 from .speaker_tracker import SpeakerTracker, SpeakerTrackingUnavailable
 from .storage import MeetingStore
 from .summarizer import (
@@ -48,7 +70,21 @@ from .summarizer import (
     fallback_incremental_summary,
     notes_only_markdown,
 )
-from .transcript import build_utterances
+from .transcript import build_utterances, is_unrecognized_text
+from .transcript_source import (
+    final_notes_current,
+    summary_is_current,
+    transcript_source,
+    transcript_source_without_segments,
+)
+from .transcription_helpers import (
+    asr_context_prompt,
+    audio_duration_ms,
+    clear_segment_speakers,
+    existing_audio_path,
+    segments_or_unrecognized,
+)
+from .transcription_pipeline import ChunkTranscriptionPipeline
 from .vibearound import VibeAroundClient
 
 
@@ -64,21 +100,25 @@ app.add_middleware(
 )
 
 store = MeetingStore()
-asr = FasterWhisperASR()
-asr_engines: Dict[str, FasterWhisperASR] = {}
+store.mark_interrupted_chunks(error="服务重启时识别被中断，请重新识别这段音频。")
+asr_runtime = ASRRuntime()
+model_downloads = ModelDownloadManager(asr_runtime.engine_for_model)
 diarizer = PyannoteDiarizer()
 local_pyannote_diarizer: Optional[PyannoteDiarizer] = None
 speaker_tracker = SpeakerTracker()
 vibearound = VibeAroundClient()
 llm = LLMManager(vibearound)
 prompt_settings = PromptConfigStore(DEFAULT_PROMPTS, DEFAULT_PROMPT_META)
+recording_config = RecordingConfigStore()
 summarizer = MeetingSummarizer(llm, prompt_getter=prompt_settings.get)
 summary_lock = asyncio.Lock()
 summary_states: Dict[str, Dict[str, Any]] = {}
 reprocess_states: Dict[str, Dict[str, Any]] = {}
 REALTIME_SUMMARY_ENABLED = False
-model_download_states: Dict[str, Dict[str, Any]] = {}
-model_load_lock = threading.Lock()
+recording_model_load_error = ""
+llm_status_cache: Dict[str, Any] = {"updated_at": 0.0, "value": {}}
+llm_status_lock = asyncio.Lock()
+LLM_STATUS_TTL_SECONDS = 10.0
 SUMMARY_TASK_TIMEOUT_SECONDS = 300.0
 SUMMARY_STALE_SECONDS = 300.0
 
@@ -98,150 +138,6 @@ SUPPORTED_ASR_LANGUAGES = {
 }
 SUPPORTED_SPEAKER_MODES = {"voiceprint", "diarization", "off", "auto"}
 
-ASR_MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
-    "tiny": {
-        "label": "轻量识别",
-        "params": "39M",
-        "disk": "约 75MB",
-        "profile": "最快，适合试录和低配机器",
-    },
-    "base": {
-        "label": "快速识别",
-        "params": "74M",
-        "disk": "约 141MB",
-        "profile": "快，准确度基础",
-    },
-    "small": {
-        "label": "标准识别",
-        "params": "244M",
-        "disk": "约 464MB",
-        "profile": "当前默认，实时余量充足",
-    },
-    "medium": {
-        "label": "高精度识别",
-        "params": "769M",
-        "disk": "约 1.5GB",
-        "profile": "更适合中文/混合语音",
-    },
-    "large-v3-turbo": {
-        "label": "高精度加速",
-        "params": "809M",
-        "disk": "约 1.6GB",
-        "profile": "会后重识别优先试它",
-    },
-    "large-v3": {
-        "label": "最高精度识别",
-        "params": "1550M",
-        "disk": "约 3GB",
-        "profile": "最重，适合离线精修",
-    },
-}
-
-MAC_MLX_ENABLED = platform.system() == "Darwin"
-MLX_ASR_MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
-    f"mlx-{name}": {
-        "label": f"MLX {meta['label']}",
-        "params": meta["params"],
-        "disk": meta["disk"],
-        "profile": f"Apple Silicon 加速 · {meta['profile']}",
-        "base_model": name,
-    }
-    for name, meta in ASR_MODEL_CATALOG.items()
-}
-SUPPORTED_ASR_MODELS = set(ASR_MODEL_CATALOG) | (
-    set(MLX_ASR_MODEL_CATALOG) if MAC_MLX_ENABLED else set()
-)
-ASR_MODEL_REPOS = {
-    "tiny": "Systran/faster-whisper-tiny",
-    "base": "Systran/faster-whisper-base",
-    "small": "Systran/faster-whisper-small",
-    "medium": "Systran/faster-whisper-medium",
-    "large-v3": "Systran/faster-whisper-large-v3",
-    "large-v3-turbo": "dropbox-dash/faster-whisper-large-v3-turbo",
-}
-PYANNOTE_COMMUNITY_MODEL_ID = "pyannote-community-1"
-PYANNOTE_COMMUNITY_REPO_ID = "pyannote/speaker-diarization-community-1"
-PYANNOTE_MODEL_DIR = MODELS_DIR / "pyannote" / "speaker-diarization-community-1"
-
-
-def discovered_asr_models() -> set[str]:
-    models: set[str] = set()
-    for model_name in SUPPORTED_ASR_MODELS:
-        if any(asr_model_cache_ready(path) for path in asr_model_cache_paths(model_name)):
-            models.add(model_name)
-    return models
-
-
-def asr_model_backend(model_name: str) -> str:
-    return "mlx" if model_name.startswith("mlx-") else "faster-whisper"
-
-
-def asr_base_model_name(model_name: str) -> str:
-    return model_name.removeprefix("mlx-")
-
-
-def asr_model_cache_dir(model_name: str) -> Path:
-    return MLX_ASR_MODEL_DIR if asr_model_backend(model_name) == "mlx" else ASR_MODEL_DIR
-
-
-def asr_model_repos(model_name: str) -> list[str]:
-    base_name = asr_base_model_name(model_name)
-    if asr_model_backend(model_name) == "mlx":
-        return [MLX_MODEL_REPOS.get(base_name, f"mlx-community/whisper-{base_name}-mlx")]
-    return [ASR_MODEL_REPOS.get(base_name, f"Systran/faster-whisper-{base_name}")]
-
-
-def asr_repo_cache_path(repo_id: str, cache_dir: Path = ASR_MODEL_DIR) -> Path:
-    return cache_dir / f"models--{repo_id.replace('/', '--')}"
-
-
-def asr_model_cache_paths(model_name: str) -> list[Path]:
-    cache_dir = asr_model_cache_dir(model_name)
-    return [asr_repo_cache_path(repo_id, cache_dir) for repo_id in asr_model_repos(model_name)]
-
-
-def asr_model_cache_ready(path: Path) -> bool:
-    snapshots = path / "snapshots"
-    if not snapshots.exists():
-        return False
-    return any(
-        (snapshot / "model.bin").is_file()
-        or (
-            (snapshot / "config.json").is_file()
-            and (
-                (snapshot / "weights.safetensors").is_file()
-                or (snapshot / "weights.npz").is_file()
-            )
-        )
-        for snapshot in snapshots.iterdir()
-        if snapshot.is_dir()
-    )
-
-
-def asr_model_cache_path(model_name: str) -> Path:
-    paths = asr_model_cache_paths(model_name)
-    for path in paths:
-        if asr_model_cache_ready(path):
-            return path
-    return paths[0]
-
-
-def directory_size_bytes(path: Path) -> int:
-    if not path.exists():
-        return 0
-    total = 0
-    for item in path.rglob("*"):
-        try:
-            if item.is_file() and not item.is_symlink():
-                total += item.stat().st_size
-        except OSError:
-            continue
-    return total
-
-
-def local_pyannote_model_path() -> Optional[Path]:
-    return PYANNOTE_MODEL_DIR if (PYANNOTE_MODEL_DIR / "config.yaml").exists() else None
-
 
 def diarizer_for_mode(mode: str) -> Optional[PyannoteDiarizer]:
     global local_pyannote_diarizer
@@ -257,65 +153,18 @@ def diarizer_for_mode(mode: str) -> Optional[PyannoteDiarizer]:
     return None
 
 
-def hf_token_available() -> bool:
-    return bool(
-        os.environ.get("VOICE_MEETING_HF_TOKEN")
-        or os.environ.get("HUGGINGFACE_TOKEN")
-        or os.environ.get("HF_TOKEN")
-    )
-
-
-def read_hf_token() -> Optional[str]:
-    return (
-        os.environ.get("VOICE_MEETING_HF_TOKEN")
-        or os.environ.get("HUGGINGFACE_TOKEN")
-        or os.environ.get("HF_TOKEN")
-    )
-
-
-def local_asr_models() -> list[str]:
-    return sorted(discovered_asr_models())
-
-
-def resolve_asr_model(value: Optional[str]) -> str:
+def normalize_asr_model(value: Optional[str]) -> str:
     model_name = (value or ASR_MODEL).strip()
     if model_name not in SUPPORTED_ASR_MODELS:
         raise HTTPException(status_code=400, detail="当前识别方式不可用，请换一个选项。")
-    if model_name not in discovered_asr_models():
-        raise HTTPException(status_code=400, detail="本地还没有这套识别资源，请选择已有的识别方式。")
     return model_name
 
 
-def model_job_key(kind: str, model: str) -> str:
-    return f"{kind}:{model}"
-
-
-def set_model_download_state(job_id: str, **fields: Any) -> Dict[str, Any]:
-    current = dict(model_download_states.get(job_id) or {})
-    current.update(fields)
-    current["updated_at"] = now_iso()
-    model_download_states[job_id] = current
-    return current
-
-
-def active_model_job(kind: str, model: str) -> Optional[Dict[str, Any]]:
-    key = model_job_key(kind, model)
-    jobs = [
-        state
-        for state in model_download_states.values()
-        if state.get("key") == key and state.get("status") in {"queued", "running"}
-    ]
-    if not jobs:
-        return None
-    return sorted(jobs, key=lambda item: str(item.get("updated_at") or ""))[-1]
-
-
-def latest_model_job(kind: str, model: str) -> Optional[Dict[str, Any]]:
-    key = model_job_key(kind, model)
-    jobs = [state for state in model_download_states.values() if state.get("key") == key]
-    if not jobs:
-        return None
-    return sorted(jobs, key=lambda item: str(item.get("updated_at") or ""))[-1]
+def resolve_asr_model(value: Optional[str]) -> str:
+    model_name = normalize_asr_model(value)
+    if model_name not in discovered_asr_models():
+        raise HTTPException(status_code=400, detail="本地还没有这套识别资源，请选择已有的识别方式。")
+    return model_name
 
 
 def model_catalog() -> Dict[str, Any]:
@@ -323,6 +172,7 @@ def model_catalog() -> Dict[str, Any]:
     asr_models = []
     catalog_groups: list[tuple[str, str, Dict[str, Dict[str, Any]]]] = [
         ("faster-whisper", "通用", ASR_MODEL_CATALOG),
+        ("funasr", "FunASR", FUNASR_MODEL_CATALOG),
     ]
     if MAC_MLX_ENABLED:
         catalog_groups.append(("mlx", "Apple MLX", MLX_ASR_MODEL_CATALOG))
@@ -330,7 +180,7 @@ def model_catalog() -> Dict[str, Any]:
         for name, meta in catalog.items():
             path = asr_model_cache_path(name)
             installed = name in installed_asr
-            cached_engine = asr_engines.get(name)
+            runtime_flags = asr_runtime.model_runtime_flags(name)
             asr_models.append(
                 {
                     "kind": "asr",
@@ -339,14 +189,17 @@ def model_catalog() -> Dict[str, Any]:
                     "label": meta["label"],
                     "params": meta["params"],
                     "disk": meta["disk"],
+                    "file_breakdown": meta.get("file_breakdown") or "",
+                    "components": meta.get("components") or "",
                     "profile": meta["profile"],
                     "installed": installed,
                     "repo_id": asr_model_repos(name)[0],
                     "path": str(path),
                     "size_bytes": directory_size_bytes(path) if installed else 0,
                     "current": name == ASR_MODEL,
-                    "loaded": (name == asr.model_name and asr.loaded) or bool(cached_engine and cached_engine.loaded),
-                    "job": latest_model_job("asr", name),
+                    "loaded": runtime_flags["loaded"],
+                    "loading": runtime_flags["loading"],
+                    "job": model_downloads.latest_job("asr", name),
                     "backend": backend,
                     "backend_label": backend_label,
                     "base_model": meta.get("base_model") or name,
@@ -359,6 +212,7 @@ def model_catalog() -> Dict[str, Any]:
         "asr": {
             "model_dir": str(ASR_MODEL_DIR),
             "mlx_model_dir": str(MLX_ASR_MODEL_DIR) if MAC_MLX_ENABLED else "",
+            "funasr_model_dir": str(FUNASR_MODEL_DIR),
             "models": asr_models,
         },
         "diarization": {
@@ -370,343 +224,51 @@ def model_catalog() -> Dict[str, Any]:
                     "name": PYANNOTE_COMMUNITY_MODEL_ID,
                     "repo_id": PYANNOTE_COMMUNITY_REPO_ID,
                     "label": "Pyannote Community-1",
-                    "params": "pipeline",
+                    "params": "pipeline（多模型组合）",
                     "disk": "约 32MB",
+                    "file_breakdown": "embedding约 25MB + segmentation约 6MB + PLDA",
+                    "components": "segmentation + embedding + PLDA",
                     "profile": "高精度说话人分离",
                     "installed": pyannote_installed,
                     "path": str(PYANNOTE_MODEL_DIR),
                     "size_bytes": directory_size_bytes(PYANNOTE_MODEL_DIR) if pyannote_installed else 0,
                     "requires_token": True,
-                    "token_available": hf_token_available(),
+                    "token_available": model_downloads.hf_token_available(),
                     "enabled": diarizer.enabled,
                     "available": diarizer.status().get("available") or (
                         pyannote_installed and not diarizer.enabled
                     ),
-                    "job": latest_model_job("diarization", PYANNOTE_COMMUNITY_MODEL_ID),
+                    "job": model_downloads.latest_job("diarization", PYANNOTE_COMMUNITY_MODEL_ID),
                 }
             ],
             "runtime": diarizer.status(),
         },
-        "downloads": sorted(
-            model_download_states.values(),
-            key=lambda item: str(item.get("updated_at") or ""),
-            reverse=True,
-        )[:24],
+        "downloads": model_downloads.recent_states(),
     }
 
 
-def _friendly_model_error(exc: Exception, kind: str = "") -> str:
-    text = str(exc)
-    lowered = text.lower()
-    if kind == "asr" and (
-        "repository not found" in lowered
-        or "401" in text
-        or "403" in text
-        or "gated" in lowered
-        or "token" in lowered
-    ):
-        return "ASR 模型下载失败，可能是下载源不可用或网络访问被拦截。请刷新模型列表后重试。"
-    if "401" in text or "403" in text or "gated" in lowered or "token" in lowered:
-        return "模型需要授权。请先配置 VOICE_MEETING_HF_TOKEN/HF_TOKEN，并确认已接受模型条款。"
-    if "connection" in lowered or "timeout" in lowered or "network" in lowered:
-        return "联网下载失败，请检查网络后重试。"
-    return text or type(exc).__name__
-
-
-def model_download_cancel_requested(job_id: str) -> bool:
-    return bool(model_download_states.get(job_id, {}).get("cancel_requested"))
-
-
-def raise_if_model_download_cancelled(job_id: str) -> None:
-    if model_download_cancel_requested(job_id):
-        raise ModelDownloadCancelled("model download cancelled")
-
-
-def cleanup_model_files(kind: str, model: str) -> None:
-    paths: list[Path] = []
-    lock_paths: list[Path] = []
-    if kind == "asr":
-        paths = asr_model_cache_paths(model)
-        cache_dir = asr_model_cache_dir(model)
-        lock_paths = [cache_dir / ".locks" / path.name for path in paths]
-    elif kind == "diarization" and model == PYANNOTE_COMMUNITY_MODEL_ID:
-        paths = [PYANNOTE_MODEL_DIR]
-
-    for path in paths + lock_paths:
-        try:
-            if path.exists():
-                shutil.rmtree(path)
-        except Exception:
-            continue
-
-
-def _download_hf_repo_files(
-    job_id: str,
-    repo_id: str,
-    *,
-    cache_dir: Optional[Path] = None,
-    local_dir: Optional[Path] = None,
-    token: Optional[str] = None,
-) -> None:
-    from huggingface_hub import HfApi, hf_hub_download, snapshot_download
-    from tqdm.auto import tqdm
-
-    class CancelAwareTqdm(tqdm):
-        current_file = ""
-        file_index = 0
-        total_files = 1
-        base_downloaded_bytes = 0
-        total_repo_bytes = 0
-        last_emit_at = 0.0
-
-        @classmethod
-        def configure(
-            cls,
-            *,
-            filename: str = "",
-            file_index: int = 0,
-            total_files: int = 1,
-            base_downloaded_bytes: int = 0,
-            total_repo_bytes: int = 0,
-        ) -> None:
-            cls.current_file = filename
-            cls.file_index = file_index
-            cls.total_files = max(1, total_files)
-            cls.base_downloaded_bytes = max(0, base_downloaded_bytes)
-            cls.total_repo_bytes = max(0, total_repo_bytes)
-            cls.last_emit_at = 0.0
-
-        def update(self, n: int = 1):
-            raise_if_model_download_cancelled(job_id)
-            result = super().update(n)
-            total_repo_bytes = type(self).total_repo_bytes
-            if total_repo_bytes <= 0:
-                return result
-
-            now = time.monotonic()
-            current_file_bytes = max(0, int(getattr(self, "n", 0) or 0))
-            downloaded = min(
-                total_repo_bytes,
-                type(self).base_downloaded_bytes + current_file_bytes,
-            )
-            if now - type(self).last_emit_at >= 0.25 or downloaded >= total_repo_bytes:
-                type(self).last_emit_at = now
-                set_model_download_state(
-                    job_id,
-                    stage=f"下载 {type(self).file_index}/{type(self).total_files}",
-                    progress=min(0.98, downloaded / total_repo_bytes),
-                    file=type(self).current_file,
-                    downloaded_bytes=downloaded,
-                    total_bytes=total_repo_bytes,
-                )
-            return result
-
-    def current_incomplete_bytes() -> int:
-        if cache_dir is None:
-            return 0
-        blobs_dir = Path(cache_dir) / f"models--{repo_id.replace('/', '--')}" / "blobs"
-        if not blobs_dir.exists():
-            return 0
-        sizes: list[int] = []
-        for path in blobs_dir.glob("*.incomplete"):
-            try:
-                sizes.append(path.stat().st_size)
-            except OSError:
-                continue
-        return max(sizes, default=0)
-
-    def start_cache_progress_poll(
-        *,
-        filename: str,
-        file_index: int,
-        total_files: int,
-        base_downloaded_bytes: int,
-        total_repo_bytes: int,
-    ) -> tuple[threading.Event, Optional[threading.Thread]]:
-        stop_event = threading.Event()
-        if cache_dir is None or total_repo_bytes <= 0:
-            return stop_event, None
-
-        def poll() -> None:
-            last_downloaded = -1
-            while not stop_event.wait(0.35):
-                if model_download_cancel_requested(job_id):
-                    return
-                current_file_bytes = current_incomplete_bytes()
-                downloaded = min(
-                    total_repo_bytes,
-                    max(0, base_downloaded_bytes) + max(0, current_file_bytes),
-                )
-                if downloaded <= last_downloaded:
-                    continue
-                last_downloaded = downloaded
-                set_model_download_state(
-                    job_id,
-                    stage=f"下载 {file_index}/{total_files}",
-                    progress=min(0.98, downloaded / total_repo_bytes),
-                    file=filename,
-                    downloaded_bytes=downloaded,
-                    total_bytes=total_repo_bytes,
-                )
-
-        thread = threading.Thread(target=poll, daemon=True)
-        thread.start()
-        return stop_event, thread
-
-    raise_if_model_download_cancelled(job_id)
-    try:
-        api = HfApi()
-        info = api.model_info(repo_id, files_metadata=True, token=token)
-        siblings = [
-            sibling
-            for sibling in (getattr(info, "siblings", None) or [])
-            if getattr(sibling, "rfilename", None)
-        ]
-    except Exception:
-        siblings = []
-
-    if not siblings:
-        set_model_download_state(job_id, stage="下载模型文件", progress=0.1)
-        raise_if_model_download_cancelled(job_id)
-        kwargs: Dict[str, Any] = {"repo_id": repo_id, "token": token}
-        if cache_dir is not None:
-            kwargs["cache_dir"] = str(cache_dir)
-        if local_dir is not None:
-            local_dir.mkdir(parents=True, exist_ok=True)
-            kwargs["local_dir"] = str(local_dir)
-        CancelAwareTqdm.configure()
-        kwargs["tqdm_class"] = CancelAwareTqdm
-        snapshot_download(**kwargs)
-        raise_if_model_download_cancelled(job_id)
-        set_model_download_state(job_id, stage="整理模型文件", progress=0.95)
-        return
-
-    files = [
-        sibling
-        for sibling in siblings
-        if not str(getattr(sibling, "rfilename", "")).endswith("/")
+def asr_model_options() -> list[Dict[str, Any]]:
+    options: list[Dict[str, Any]] = []
+    installed_models = set(discovered_asr_models())
+    catalog_groups: list[tuple[str, str, Dict[str, Dict[str, Any]]]] = [
+        ("faster-whisper", "通用", ASR_MODEL_CATALOG),
+        ("funasr", "FunASR", FUNASR_MODEL_CATALOG),
     ]
-    total_files = max(1, len(files))
-    total_bytes = sum(int(getattr(item, "size", 0) or 0) for item in files)
-    downloaded_bytes = 0
-    for index, item in enumerate(files, start=1):
-        raise_if_model_download_cancelled(job_id)
-        filename = str(getattr(item, "rfilename"))
-        size = int(getattr(item, "size", 0) or 0)
-        progress = (
-            min(0.98, downloaded_bytes / total_bytes)
-            if total_bytes > 0
-            else min(0.98, (index - 1) / total_files)
-        )
-        set_model_download_state(
-            job_id,
-            stage=f"下载 {index}/{total_files}",
-            progress=progress,
-            file=filename,
-            downloaded_bytes=downloaded_bytes,
-            total_bytes=total_bytes,
-        )
-        CancelAwareTqdm.configure(
-            filename=filename,
-            file_index=index,
-            total_files=total_files,
-            base_downloaded_bytes=downloaded_bytes,
-            total_repo_bytes=total_bytes,
-        )
-        kwargs = {
-            "repo_id": repo_id,
-            "filename": filename,
-            "token": token,
-        }
-        if cache_dir is not None:
-            kwargs["cache_dir"] = str(cache_dir)
-        if local_dir is not None:
-            local_dir.mkdir(parents=True, exist_ok=True)
-            kwargs["local_dir"] = str(local_dir)
-        kwargs["tqdm_class"] = CancelAwareTqdm
-        stop_event, poll_thread = start_cache_progress_poll(
-            filename=filename,
-            file_index=index,
-            total_files=total_files,
-            base_downloaded_bytes=downloaded_bytes,
-            total_repo_bytes=total_bytes,
-        )
-        try:
-            hf_hub_download(**kwargs)
-        finally:
-            stop_event.set()
-            if poll_thread is not None:
-                poll_thread.join(timeout=1.0)
-        raise_if_model_download_cancelled(job_id)
-        downloaded_bytes += size
-        set_model_download_state(
-            job_id,
-            stage=f"下载 {index}/{total_files}",
-            progress=(
-                min(0.98, downloaded_bytes / total_bytes)
-                if total_bytes > 0
-                else min(0.98, index / total_files)
-            ),
-            file=filename,
-            downloaded_bytes=downloaded_bytes,
-            total_bytes=total_bytes,
-        )
-
-
-async def download_model_job(job_id: str, kind: str, model: str) -> None:
-    set_model_download_state(job_id, status="running", stage="准备下载", progress=0.0)
-    try:
-        if kind == "asr":
-            if model not in SUPPORTED_ASR_MODELS:
-                raise ValueError("当前识别模型不可用。")
-            cache_dir = asr_model_cache_dir(model)
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            repo_id = asr_model_repos(model)[0]
-            set_model_download_state(job_id, repo_id=repo_id, stage="连接下载源")
-            await asyncio.to_thread(
-                _download_hf_repo_files,
-                job_id,
-                repo_id,
-                cache_dir=cache_dir,
+    if MAC_MLX_ENABLED:
+        catalog_groups.append(("mlx", "Apple MLX", MLX_ASR_MODEL_CATALOG))
+    for backend, backend_label, catalog in catalog_groups:
+        for name, meta in catalog.items():
+            options.append(
+                {
+                    "name": name,
+                    "label": meta["label"],
+                    "backend": backend,
+                    "backend_label": backend_label,
+                    "base_model": meta.get("base_model") or name,
+                    "installed": name in installed_models,
+                }
             )
-        elif kind == "diarization" and model == PYANNOTE_COMMUNITY_MODEL_ID:
-            await asyncio.to_thread(
-                _download_hf_repo_files,
-                job_id,
-                PYANNOTE_COMMUNITY_REPO_ID,
-                local_dir=PYANNOTE_MODEL_DIR,
-                token=read_hf_token(),
-            )
-        else:
-            raise ValueError("当前模型不可用。")
-        set_model_download_state(
-            job_id,
-            status="done",
-            stage="已安装",
-            progress=1.0,
-            error="",
-            finished_at=now_iso(),
-        )
-    except ModelDownloadCancelled:
-        cleanup_model_files(kind, model)
-        set_model_download_state(
-            job_id,
-            status="cancelled",
-            stage="已取消",
-            progress=0.0,
-            error="",
-            cancel_requested=True,
-            finished_at=now_iso(),
-        )
-    except Exception as exc:
-        set_model_download_state(
-            job_id,
-            status="error",
-            stage="下载失败",
-            progress=0.0,
-            error=_friendly_model_error(exc, kind),
-            finished_at=now_iso(),
-        )
+    return options
 
 
 def parse_optional_ms(value: Optional[str]) -> Optional[int]:
@@ -721,53 +283,6 @@ def parse_optional_ms(value: Optional[str]) -> Optional[int]:
         raise HTTPException(status_code=400, detail="音频时间信息无效，请重新录制或导入。")
 
 
-def existing_audio_path(*values: Optional[str]) -> Optional[Path]:
-    for value in values:
-        if not value:
-            continue
-        path = Path(str(value))
-        if path.is_file():
-            return path
-    return None
-
-
-def audio_duration_ms(path: Path) -> Optional[int]:
-    if path.suffix.lower() == ".wav":
-        try:
-            with wave.open(str(path), "rb") as handle:
-                frames = handle.getnframes()
-                rate = handle.getframerate()
-                if rate > 0:
-                    return int(round(frames * 1000 / rate))
-        except Exception:
-            pass
-    try:
-        ffprobe = ffprobe_path()
-        if ffprobe is None:
-            return None
-        result = subprocess.run(
-            [
-                ffprobe,
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                str(path),
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            check=False,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return int(round(float(result.stdout.strip()) * 1000))
-    except Exception:
-        pass
-    return None
-
-
 def clean_identifier(value: str, fallback: str = "job") -> str:
     cleaned = "".join(ch for ch in (value or fallback).strip().lower() if ch.isalnum() or ch in "-_")
     return cleaned or fallback
@@ -780,32 +295,6 @@ def resolve_speaker_mode(value: Optional[str]) -> str:
     return mode
 
 
-def clear_segment_speakers(segments: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
-    return [{**segment, "speaker": ""} for segment in segments]
-
-
-def asr_context_prompt(
-    meeting: Dict[str, Any],
-    recent_context: str = "",
-    configured_prompt: str = "",
-) -> str:
-    title = re.sub(r"\s+", " ", str(meeting.get("title") or "")).strip()
-    description = re.sub(r"\s+", " ", str(meeting.get("description") or "")).strip()
-    generic_titles = {"今天的会议", "新会议", "新会议标题", "untitled meeting", "meeting"}
-    parts: list[str] = []
-    custom = re.sub(r"\s+", " ", str(configured_prompt or "")).strip()
-    if custom:
-        parts.append(custom[:600])
-    if title and title.lower() not in generic_titles:
-        parts.append(f"会议标题：{title[:80]}")
-    if description:
-        parts.append(f"会议引导词：{description[:180]}")
-    recent = re.sub(r"\s+", " ", str(recent_context or "")).strip()
-    if recent:
-        parts.append(f"前文：{recent[-240:]}")
-    return " ".join(parts)
-
-
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -815,58 +304,6 @@ def sse_event(event: str, data: Dict[str, Any]) -> str:
         f"event: {event}\n"
         f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
     )
-
-
-def transcript_source(meeting: Dict[str, Any], segments: Optional[list[Dict[str, Any]]] = None) -> Dict[str, Any]:
-    segment_rows = list(segments if segments is not None else meeting.get("segments") or [])
-    payload = [
-        {
-            "speaker": str(segment.get("speaker") or ""),
-            "text": str(segment.get("text") or "").strip(),
-            "start_ms": int(segment.get("start_ms") or 0),
-            "end_ms": int(segment.get("end_ms") or 0),
-            "chunk_id": str(segment.get("chunk_id") or ""),
-        }
-        for segment in segment_rows
-        if str(segment.get("text") or "").strip()
-    ]
-    digest = hashlib.sha1(
-        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-    return {
-        "version_id": str(meeting.get("active_version_id") or "auto"),
-        "hash": digest,
-        "segment_count": len(payload),
-    }
-
-
-def transcript_source_without_segments(
-    meeting: Dict[str, Any],
-    removed_segment_ids: set[str],
-) -> Dict[str, Any]:
-    segments = [
-        segment
-        for segment in meeting.get("segments") or []
-        if str(segment.get("id") or "") not in removed_segment_ids
-    ]
-    return transcript_source(meeting, segments)
-
-
-def summary_is_current(meeting: Dict[str, Any], source: Optional[Dict[str, Any]] = None) -> bool:
-    current_source = source or transcript_source(meeting)
-    if int(current_source.get("segment_count") or 0) == 0:
-        summary = meeting.get("summary") or {}
-        has_summary = bool(summary.get("summary")) or any(
-            bool(summary.get(key))
-            for key in ("topics", "decisions", "action_items", "open_questions", "risks")
-        )
-        return not has_summary
-    return bool(current_source.get("hash")) and meeting.get("summary_source_hash") == current_source.get("hash")
-
-
-def final_notes_current(meeting: Dict[str, Any], source: Optional[Dict[str, Any]] = None) -> bool:
-    current_source = source or transcript_source(meeting)
-    return bool(meeting.get("final_markdown")) and meeting.get("final_source_hash") == current_source.get("hash")
 
 
 def set_summary_state(meeting_id: str, status: str, error: str = "") -> None:
@@ -958,7 +395,7 @@ def meeting_runtime(meeting_id: str) -> Dict[str, Any]:
         "has_active_chunks": bool(active_chunks),
         "summary": summary_state,
         "reprocess": latest_reprocess_state(meeting_id),
-        "asr": {**asr.status(), "available_models": local_asr_models()},
+        "asr": asr_runtime.active_status(),
         "diarization": diarizer.status(),
         "speaker_tracking": speaker_tracker.status(),
         "llm": llm.describe(),
@@ -1037,91 +474,29 @@ async def ensure_summary_current(meeting_id: str) -> Dict[str, Any]:
     return store.get_meeting(meeting_id)
 
 
-class CreateMeetingRequest(BaseModel):
-    title: Optional[str] = None
-    description: Optional[str] = None
-
-
-class UpdateMeetingRequest(BaseModel):
-    title: str
-    description: Optional[str] = None
-
-
-class CreateVersionRequest(BaseModel):
-    version_id: Optional[str] = None
-    label: Optional[str] = None
-    kind: str = "manual"
-    parent_version_id: Optional[str] = None
-    settings: Dict[str, Any] = {}
-    make_current: bool = False
-
-
-class CreateEditableVersionRequest(BaseModel):
-    source_version_id: Optional[str] = None
-
-
-class UpdateSegmentRequest(BaseModel):
-    text: Optional[str] = None
-    speaker: Optional[str] = None
-
-
-class RenameSpeakerRequest(BaseModel):
-    old_label: str
-    new_label: str
-
-
-class AskMessage(BaseModel):
-    role: str = "user"
-    content: str
-
-
-class MeetingAskRequest(BaseModel):
-    prompt: str
-    history: list[AskMessage] = []
-
-
-class ReprocessRequest(BaseModel):
-    level: str = "asr"
-    language: Optional[str] = "auto"
-    asr_model: Optional[str] = None
-    speaker_mode: Optional[str] = "voiceprint"
-    make_current: bool = True
-    force_local: bool = False
-    source_version_id: Optional[str] = None
-    reset_speakers: bool = False
-
-
-class FinalizeRequest(BaseModel):
-    force_local: bool = False
-
-
-class ModelDownloadRequest(BaseModel):
-    kind: str = "asr"
-    model: str
-
-
-class LLMOpenAIChatRequest(BaseModel):
-    base_url: Optional[str] = None
-    api_key: Optional[str] = None
-    model: Optional[str] = None
-
-
-class LLMConfigRequest(BaseModel):
-    provider: str = "vibearound"
-    openai_chat: LLMOpenAIChatRequest = Field(default_factory=LLMOpenAIChatRequest)
-
-
-class PromptConfigRequest(BaseModel):
-    prompts: Dict[str, str] = {}
-
-
-class ModelDownloadCancelled(RuntimeError):
-    pass
+async def send_changed_json(websocket: WebSocket, payload: Dict[str, Any], previous: str) -> str:
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if encoded != previous:
+        await websocket.send_json(payload)
+    return encoded
 
 
 @app.get("/api/models")
 async def list_models() -> Dict[str, Any]:
     return model_catalog()
+
+
+@app.websocket("/api/models/ws")
+async def models_websocket(websocket: WebSocket) -> None:
+    await websocket.accept()
+    previous = ""
+    try:
+        while True:
+            payload = await asyncio.to_thread(model_catalog)
+            previous = await send_changed_json(websocket, payload, previous)
+            await asyncio.sleep(1.5)
+    except WebSocketDisconnect:
+        return
 
 
 @app.post("/api/models/download")
@@ -1132,24 +507,13 @@ async def start_model_download(payload: ModelDownloadRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="当前识别模型不可用。")
     if kind == "diarization" and model != PYANNOTE_COMMUNITY_MODEL_ID:
         raise HTTPException(status_code=400, detail="当前说话人分离模型不可用。")
-    running = active_model_job(kind, model)
+    running = model_downloads.active_job(kind, model)
     if running:
         return {"job": running, "catalog": model_catalog()}
 
     job_id = uuid.uuid4().hex
-    state = set_model_download_state(
-        job_id,
-        id=job_id,
-        key=model_job_key(kind, model),
-        kind=kind,
-        model=model,
-        status="queued",
-        stage="queued",
-        progress=0.0,
-        error="",
-        created_at=now_iso(),
-    )
-    asyncio.create_task(download_model_job(job_id, kind, model))
+    state = model_downloads.create_job(job_id, kind, model)
+    asyncio.create_task(model_downloads.download_job(job_id, kind, model))
     return {"job": state, "catalog": model_catalog()}
 
 
@@ -1157,33 +521,25 @@ async def start_model_download(payload: ModelDownloadRequest) -> Dict[str, Any]:
 async def delete_model(kind: str, model: str) -> Dict[str, Any]:
     clean_kind = clean_identifier(kind, "asr")
     clean_model = model.strip()
-    running = active_model_job(clean_kind, clean_model)
+    running = model_downloads.active_job(clean_kind, clean_model)
     if running:
-        set_model_download_state(
-            str(running["id"]),
-            status="cancelling",
-            stage="正在取消",
-            cancel_requested=True,
-            error="",
-        )
-        cleanup_model_files(clean_kind, clean_model)
+        model_downloads.request_cancel(str(running["id"]))
+        model_downloads.cleanup_model_files(clean_kind, clean_model)
         return model_catalog()
 
     if clean_kind == "asr":
         if clean_model not in SUPPORTED_ASR_MODELS:
             raise HTTPException(status_code=400, detail="当前识别模型不可用。")
-        if clean_model == asr.model_name and asr.loaded:
-            raise HTTPException(status_code=409, detail="当前识别模型已加载，请重启服务后再删除。")
-        cached_engine = asr_engines.get(clean_model)
-        if cached_engine is not None and cached_engine.loaded:
-            raise HTTPException(status_code=409, detail="这个识别模型已加载，请重启服务后再删除。")
+        if asr_runtime.is_loaded(clean_model):
+            detail = "当前识别模型已加载，请重启服务后再删除。" if clean_model == ASR_MODEL else "这个识别模型已加载，请重启服务后再删除。"
+            raise HTTPException(status_code=409, detail=detail)
     elif clean_kind == "diarization" and clean_model == PYANNOTE_COMMUNITY_MODEL_ID:
         if diarizer.loaded or bool(local_pyannote_diarizer and local_pyannote_diarizer.loaded):
             raise HTTPException(status_code=409, detail="说话人分离模型已加载，请重启服务后再删除。")
     else:
         raise HTTPException(status_code=400, detail="当前模型不可用。")
 
-    cleanup_model_files(clean_kind, clean_model)
+    model_downloads.cleanup_model_files(clean_kind, clean_model)
     return model_catalog()
 
 
@@ -1197,7 +553,7 @@ async def health() -> Dict[str, Any]:
         "features": ["models.load", "native-save", "i18n"],
         "project_dir": str(PROJECT_DIR),
         "asr_model": ASR_MODEL,
-        "asr": {**asr.status(), "available_models": local_asr_models()},
+        "asr": asr_runtime.active_status(),
         "diarization": diarizer.status(),
         "speaker_tracking": speaker_tracker.status(),
     }
@@ -1318,6 +674,26 @@ async def activate_meeting_version(
         raise HTTPException(status_code=404, detail="找不到这份稿件，请刷新后再试。")
 
 
+@app.delete("/api/meetings/{meeting_id}/versions/{version_id}")
+async def delete_meeting_version(
+    meeting_id: str,
+    version_id: str,
+    background_tasks: BackgroundTasks,
+) -> Dict[str, Any]:
+    try:
+        meeting_before = store.get_meeting(meeting_id)
+        meeting = store.delete_transcript_version(meeting_id, version_id)
+        if (meeting_before.get("active_version_id") or "auto") == version_id:
+            queue_summary_rebuild(meeting_id, background_tasks, "稿件已删除")
+        return meeting
+    except KeyError:
+        raise HTTPException(status_code=404, detail="找不到这份稿件，请刷新后再试。")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
 @app.post("/api/meetings/{meeting_id}/versions/editable")
 async def create_editable_meeting_version(
     meeting_id: str,
@@ -1429,12 +805,13 @@ async def start_reprocess_job(
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
 
     if level in {"asr", "rerun-asr", "full-asr"}:
-        requested_language = (payload.language or "auto").strip().lower()
+        active_recording_config = recording_config.read()
+        requested_language = str(active_recording_config.get("language") or payload.language or "auto").strip().lower()
         if requested_language not in SUPPORTED_ASR_LANGUAGES:
             raise HTTPException(status_code=400, detail="当前语言暂不支持，请换一种语言设置。")
-        requested_model = resolve_asr_model(payload.asr_model)
+        requested_model = normalize_asr_model(active_recording_config.get("asr_model"))
         try:
-            require_loaded_asr_engine(requested_model)
+            asr_runtime.require_loaded_engine(requested_model)
         except ASRUnavailable as exc:
             raise HTTPException(status_code=503, detail=str(exc))
         source_version_id = payload.source_version_id or meeting.get("active_version_id") or "auto"
@@ -1477,6 +854,7 @@ async def start_reprocess_job(
             meeting_id,
             job_id,
             version_id,
+            source_version_id,
             requested_language,
             requested_model,
             requested_speaker_mode,
@@ -1619,7 +997,7 @@ async def start_reprocess_job(
                     chunk_id,
                     [
                         {
-                            "speaker": utterance.get("speaker") or "Speaker",
+                            "speaker": "" if is_unrecognized_text(utterance.get("text")) else utterance.get("speaker") or "Speaker",
                             "text": utterance.get("text") or "",
                             "start_ms": start_ms,
                             "end_ms": end_ms,
@@ -1694,6 +1072,23 @@ async def get_meeting_runtime(meeting_id: str) -> Dict[str, Any]:
         return meeting_runtime(meeting_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="找不到这场会议，可能已经被删除。")
+
+
+@app.websocket("/api/meetings/{meeting_id}/runtime/ws")
+async def meeting_runtime_websocket(websocket: WebSocket, meeting_id: str) -> None:
+    await websocket.accept()
+    previous = ""
+    try:
+        while True:
+            try:
+                payload = await asyncio.to_thread(meeting_runtime, meeting_id)
+            except KeyError:
+                await websocket.send_json({"meeting_id": meeting_id, "error": "not_found"})
+                return
+            previous = await send_changed_json(websocket, payload, previous)
+            await asyncio.sleep(0.8)
+    except WebSocketDisconnect:
+        return
 
 
 @app.post("/api/meetings/{meeting_id}/ask")
@@ -1841,17 +1236,18 @@ async def upload_chunk(
     cut_reason: str = Form(""),
 ) -> Dict[str, Any]:
     try:
-        meeting_before = store.get_meeting(meeting_id)
+        store.get_meeting(meeting_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="找不到这场会议，可能已经被删除。")
 
-    requested_language = (language or "zh").strip().lower()
+    active_recording_config = recording_config.read()
+    requested_language = str(active_recording_config.get("language") or language or "zh").strip().lower()
     if requested_language not in SUPPORTED_ASR_LANGUAGES:
         raise HTTPException(status_code=400, detail="当前语言暂不支持，请换一种语言设置。")
-    requested_model = resolve_asr_model(asr_model)
-    requested_speaker_mode = resolve_speaker_mode(speaker_mode)
+    requested_model = normalize_asr_model(active_recording_config.get("asr_model") or asr_model)
+    requested_speaker_mode = resolve_speaker_mode(str(active_recording_config.get("speaker_mode") or speaker_mode))
     try:
-        asr_engine = require_loaded_asr_engine(requested_model)
+        asr_engine = asr_runtime.require_loaded_engine(requested_model)
     except ASRUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc))
 
@@ -1874,89 +1270,24 @@ async def upload_chunk(
         ended_at_ms=parsed_ended_at_ms,
         cut_reason=cut_reason,
     )
-    audio_path = Path(chunk["audio_path"])
-    if audio_path.suffix.lower() == ".wav":
-        wav_path = audio_path.with_name(f"{audio_path.stem}_16k.wav")
-    else:
-        wav_path = audio_path.with_suffix(".wav")
     try:
-        store.update_chunk(chunk["id"], status="converting")
-        asr.convert_to_wav(audio_path, wav_path)
-        store.update_chunk(chunk["id"], wav_path=str(wav_path), status="transcribing")
-        meeting_for_prompt = store.get_meeting(meeting_id)
-        recent_context = "\n".join(
-            segment.get("text", "")
-            for segment in (meeting_for_prompt.get("segments") or [])[-6:]
-            if segment.get("text")
+        transcription = await ChunkTranscriptionPipeline(
+            store=store,
+            audio_converter=asr_runtime.audio_converter,
+            prompt_getter=prompt_settings.get,
+            diarizer_for_mode=diarizer_for_mode,
+            speaker_tracker=speaker_tracker,
+        ).process(
+            meeting_id=meeting_id,
+            chunk=chunk,
+            asr_engine=asr_engine,
+            requested_language=requested_language,
+            requested_model=requested_model,
+            requested_speaker_mode=requested_speaker_mode,
         )
-        result = await asyncio.to_thread(
-            asr_engine.transcribe,
-            wav_path,
-            requested_language,
-            asr_context_prompt(
-                meeting_for_prompt,
-                recent_context,
-                prompt_settings.get("asr_context", ""),
-            ),
-        )
-        diarization_result = {
-            "status": "disabled",
-            "mode": requested_speaker_mode,
-            "turns": [],
-            "error": "",
-        }
-        active_diarizer = diarizer_for_mode(requested_speaker_mode)
-        if active_diarizer is not None:
-            try:
-                store.update_chunk(chunk["id"], status="diarizing")
-                turns = await asyncio.to_thread(active_diarizer.diarize, wav_path)
-                if requested_speaker_mode == "diarization" or not speaker_tracker.enabled:
-                    result["segments"] = assign_speakers(result["segments"], turns)
-                diarization_result = {
-                    "status": "done",
-                    "mode": requested_speaker_mode,
-                    "turns": turns,
-                    "error": "",
-                }
-            except DiarizationUnavailable as exc:
-                diarization_result = {
-                    "status": "error",
-                    "mode": requested_speaker_mode,
-                    "turns": [],
-                    "error": str(exc),
-                }
-        speaker_result = {
-            "status": "disabled",
-            "mode": requested_speaker_mode,
-            "assigned": 0,
-            "created": 0,
-            "error": "",
-        }
-        use_speaker_tracking = speaker_tracker.enabled and requested_speaker_mode in {
-            "voiceprint",
-            "auto",
-        }
-        if use_speaker_tracking:
-            try:
-                store.update_chunk(chunk["id"], status="identifying_speakers")
-                result["segments"], speaker_result = await asyncio.to_thread(
-                    speaker_tracker.assign_segments,
-                    store,
-                    meeting_id,
-                    wav_path,
-                    result["segments"],
-                )
-                speaker_result["mode"] = requested_speaker_mode
-            except SpeakerTrackingUnavailable as exc:
-                speaker_result = {
-                    "status": "error",
-                    "mode": requested_speaker_mode,
-                    "assigned": 0,
-                    "created": 0,
-                    "error": str(exc),
-                }
-        inserted = store.add_segments(meeting_id, chunk["id"], result["segments"])
-        store.update_chunk(chunk["id"], status="done")
+    except asyncio.CancelledError:
+        store.update_chunk(chunk["id"], status="error", error="请求已取消。")
+        raise
     except ASRUnavailable as exc:
         store.update_chunk(chunk["id"], status="error", error=str(exc))
         raise HTTPException(status_code=503, detail=str(exc))
@@ -1965,26 +1296,26 @@ async def upload_chunk(
         raise HTTPException(status_code=500, detail=str(exc))
 
     meeting = store.get_meeting(meeting_id)
-    if inserted:
+    if transcription.inserted:
         store.clear_final_markdown(meeting_id)
 
     return {
         "chunk": store.get_chunk(chunk["id"]),
-        "segments": inserted,
+        "segments": transcription.inserted,
         "utterances": meeting.get("utterances") or [],
         "summary": meeting["summary"],
         "runtime": meeting_runtime(meeting_id),
         "asr": {
-            "requested_language": result.get("requested_language"),
+            "requested_language": transcription.asr.get("requested_language"),
             "model": requested_model,
-            "language": result.get("language"),
-            "language_probability": result.get("language_probability"),
-            "top_languages": result.get("top_languages") or [],
-            "multilingual": result.get("multilingual"),
-            "vad_segments": result.get("vad_segments") or [],
+            "language": transcription.asr.get("language"),
+            "language_probability": transcription.asr.get("language_probability"),
+            "top_languages": transcription.asr.get("top_languages") or [],
+            "multilingual": transcription.asr.get("multilingual"),
+            "vad_segments": transcription.asr.get("vad_segments") or [],
         },
-        "diarization": diarization_result,
-        "speaker_tracking": speaker_result,
+        "diarization": transcription.diarization,
+        "speaker_tracking": transcription.speaker_tracking,
         "summary_status": "idle",
     }
 
@@ -2002,53 +1333,9 @@ def prepare_chunk_wav(chunk: Dict[str, Any]) -> Path:
         wav_path = audio_path.with_name(f"{audio_path.stem}_16k.wav")
     else:
         wav_path = audio_path.with_suffix(".wav")
-    asr.convert_to_wav(audio_path, wav_path)
+    asr_runtime.audio_converter.convert_to_wav(audio_path, wav_path)
     store.update_chunk(chunk["id"], wav_path=str(wav_path))
     return wav_path
-
-
-def asr_engine_for_model(model_name: str) -> FasterWhisperASR:
-    if model_name == asr.model_name:
-        return asr
-    engine = asr_engines.get(model_name)
-    if engine is None:
-        if asr_model_backend(model_name) == "mlx":
-            engine = MlxWhisperASR(
-                model_name=asr_base_model_name(model_name),
-                repo_id=asr_model_repos(model_name)[0],
-                display_name=model_name,
-            )
-        else:
-            runtime_model = model_name
-            for repo_id in asr_model_repos(model_name):
-                if (asr_repo_cache_path(repo_id, ASR_MODEL_DIR) / "snapshots").exists():
-                    runtime_model = repo_id
-                    break
-            engine = FasterWhisperASR(model_name=runtime_model)
-        asr_engines[model_name] = engine
-    return engine
-
-
-def asr_model_label(model_name: str) -> str:
-    meta = (MLX_ASR_MODEL_CATALOG if asr_model_backend(model_name) == "mlx" else ASR_MODEL_CATALOG).get(model_name)
-    return str((meta or {}).get("label") or model_name)
-
-
-def loaded_asr_engine_items() -> list[tuple[str, FasterWhisperASR]]:
-    items: list[tuple[str, FasterWhisperASR]] = []
-    if asr.loaded:
-        items.append((ASR_MODEL, asr))
-    for model_name, engine in asr_engines.items():
-        if engine.loaded:
-            items.append((model_name, engine))
-    return items
-
-
-def require_loaded_asr_engine(model_name: str) -> FasterWhisperASR:
-    engine = asr_engine_for_model(model_name)
-    if not engine.loaded:
-        raise ASRUnavailable("识别模型尚未加载，请先在设置中加载模型。")
-    return engine
 
 
 @app.post("/api/models/load")
@@ -2056,51 +1343,135 @@ async def load_model(payload: ModelDownloadRequest) -> Dict[str, Any]:
     kind = clean_identifier(payload.kind or "asr", "asr")
     if kind != "asr":
         raise HTTPException(status_code=400, detail="当前只支持加载语音识别模型。")
-    requested_model = resolve_asr_model(payload.model)
-
-    def load_in_thread() -> Dict[str, Any]:
-        with model_load_lock:
-            unloaded = []
-            for loaded_model, engine in loaded_asr_engine_items():
-                if loaded_model == requested_model:
-                    continue
-                engine.unload()
-                unloaded.append({
-                    "model": loaded_model,
-                    "label": asr_model_label(loaded_model),
-                })
-
-            engine = asr_engine_for_model(requested_model)
-            engine.load()
-            return {
-                "kind": "asr",
-                "model": requested_model,
-                "label": asr_model_label(requested_model),
-                "unloaded": unloaded,
-                "status": engine.status(),
-                "catalog": model_catalog(),
-            }
-
     try:
-        return await asyncio.to_thread(load_in_thread)
+        requested_model = normalize_asr_model(payload.model)
+        result = await asyncio.to_thread(asr_runtime.load_model_sync, requested_model)
+        return {**result, "catalog": model_catalog()}
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"模型加载失败：{exc}")
+
+
+def configured_asr_loaded(model_name: str) -> bool:
+    return asr_runtime.is_loaded(model_name)
+
+
+def recording_config_response() -> Dict[str, Any]:
+    config = recording_config.read()
+    return {
+        "ok": True,
+        "api_revision": 3,
+        "config": config,
+        "asr": asr_runtime.active_status(),
+        "configured_model_loaded": configured_asr_loaded(config["asr_model"]),
+        "load_error": recording_model_load_error,
+        "asr_options": asr_model_options(),
+    }
+
+
+async def cached_llm_status() -> Dict[str, Any]:
+    now = time.monotonic()
+    cached_at = float(llm_status_cache.get("updated_at") or 0.0)
+    cached_value = llm_status_cache.get("value")
+    if isinstance(cached_value, dict) and cached_value and now - cached_at < LLM_STATUS_TTL_SECONDS:
+        return cached_value
+    async with llm_status_lock:
+        now = time.monotonic()
+        cached_at = float(llm_status_cache.get("updated_at") or 0.0)
+        cached_value = llm_status_cache.get("value")
+        if isinstance(cached_value, dict) and cached_value and now - cached_at < LLM_STATUS_TTL_SECONDS:
+            return cached_value
+        try:
+            value = await llm.status()
+        except Exception as exc:
+            value = {
+                "ok": False,
+                **llm.describe(),
+                "config": llm.public_config(),
+                "error": str(exc),
+            }
+        llm_status_cache["updated_at"] = now
+        llm_status_cache["value"] = value
+        return value
+
+
+async def app_status_response() -> Dict[str, Any]:
+    return {
+        **recording_config_response(),
+        "llm": await cached_llm_status(),
+    }
+
+
+async def load_recording_model_from_config() -> None:
+    global recording_model_load_error
+    config = recording_config.read()
+    try:
+        await asyncio.to_thread(asr_runtime.load_model_sync, config["asr_model"])
+        recording_model_load_error = ""
+    except Exception as exc:
+        recording_model_load_error = str(exc)
+
+
+@app.on_event("startup")
+async def load_recording_model_on_startup() -> None:
+    asyncio.create_task(load_recording_model_from_config())
+
+
+@app.get("/api/recording-config")
+async def get_recording_config() -> Dict[str, Any]:
+    return recording_config_response()
+
+
+@app.put("/api/recording-config")
+async def update_recording_config(payload: RecordingConfigRequest) -> Dict[str, Any]:
+    global recording_model_load_error
+    current = recording_config.read()
+    updates = payload.model_dump(exclude_none=True)
+    next_config = {**current, **updates}
+    requested_model = normalize_asr_model(next_config.get("asr_model"))
+    next_config["asr_model"] = requested_model
+    model_changed = requested_model != current.get("asr_model")
+    needs_load = model_changed or not configured_asr_loaded(requested_model)
+    recording_config.save(next_config)
+    try:
+        if needs_load:
+            await asyncio.to_thread(asr_runtime.load_model_sync, requested_model)
+        recording_model_load_error = ""
+    except Exception as exc:
+        recording_model_load_error = str(exc)
+        raise HTTPException(status_code=500, detail=f"模型加载失败：{exc}")
+    return recording_config_response()
+
+
+@app.websocket("/api/status/ws")
+async def status_websocket(websocket: WebSocket) -> None:
+    await websocket.accept()
+    previous = ""
+    try:
+        while True:
+            previous = await send_changed_json(websocket, await app_status_response(), previous)
+            await asyncio.sleep(1.0)
+    except WebSocketDisconnect:
+        return
 
 
 async def reprocess_asr_version(
     meeting_id: str,
     job_id: str,
     version_id: str,
+    source_version_id: str,
     language: str,
     model_name: str,
     speaker_mode: str,
     make_current: bool,
 ) -> None:
     inserted_total = 0
+    unrecognized_total = 0
     assigned_total = 0
     created_total = 0
     try:
-        asr_engine = require_loaded_asr_engine(model_name)
+        asr_engine = asr_runtime.require_loaded_engine(model_name)
         meeting = store.get_meeting(meeting_id)
         chunks = [
             chunk
@@ -2170,10 +1541,14 @@ async def reprocess_asr_version(
                 except SpeakerTrackingUnavailable:
                     pass
 
+            raw_segments = result.get("segments") or []
+            if not [segment for segment in raw_segments if str(segment.get("text") or "").strip()]:
+                unrecognized_total += 1
+            segments_to_store = segments_or_unrecognized(chunk, raw_segments)
             inserted = store.add_segments(
                 meeting_id,
                 chunk["id"],
-                result.get("segments") or [],
+                segments_to_store,
                 version_id=version_id,
             )
             inserted_total += len(inserted)
@@ -2181,18 +1556,22 @@ async def reprocess_asr_version(
                 segment.get("text", "")
                 for segment in inserted[-8:]
                 if segment.get("text")
+                and not is_unrecognized_text(segment.get("text"))
             ) or recent_context
             set_reprocess_state(
                 job_id,
                 progress=index,
                 inserted_segments=inserted_total,
+                unrecognized_segments=unrecognized_total,
             )
 
         settings = {
             "model": model_name,
             "language": language,
             "speaker_mode": speaker_mode,
+            "source_version_id": source_version_id,
             "inserted_segments": inserted_total,
+            "unrecognized_segments": unrecognized_total,
             "assigned_segments": assigned_total,
             "created_speakers": created_total,
         }
@@ -2205,6 +1584,7 @@ async def reprocess_asr_version(
             stage="done",
             progress=len(chunks),
             inserted_segments=inserted_total,
+            unrecognized_segments=unrecognized_total,
             assigned_segments=assigned_total,
             created_speakers=created_total,
         )
@@ -2355,6 +1735,8 @@ def repair_batches(segments: list[Dict[str, Any]]) -> list[list[Dict[str, Any]]]
     current_chars = 0
     for segment in segments:
         text = str(segment.get("text") or "")
+        if not text.strip() or is_unrecognized_text(text):
+            continue
         if current and (len(current) >= 24 or current_chars + len(text) > 2600):
             batches.append(current)
             current = []
@@ -2629,6 +2011,7 @@ async def finalize_meeting(meeting_id: str, payload: FinalizeRequest) -> Dict[st
 async def stop_meeting(meeting_id: str) -> Dict[str, Any]:
     try:
         store.update_meeting_status(meeting_id, "stopped")
+        store.mark_interrupted_chunks(meeting_id, error="录音已停止，未完成的识别已取消。")
         return store.get_meeting(meeting_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="找不到这场会议，可能已经被删除。")

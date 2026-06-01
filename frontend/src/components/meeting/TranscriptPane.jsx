@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
+  ChevronDown,
+  CircleEllipsis,
   Download,
   FilePenLine,
   ListTree,
@@ -10,6 +12,7 @@ import {
   Scissors,
   SlidersHorizontal,
   Sparkles,
+  Trash2,
   Users,
   X,
 } from "lucide-react";
@@ -18,8 +21,11 @@ import {
   formatAsrDisplay,
   formatOffset,
   formatTime,
+  isUnrecognizedTranscriptItem,
+  recognizedTranscriptItems,
   runtimeLine,
   transcriptParts,
+  UNRECOGNIZED_TEXT,
   transcriptVersionName,
   transcriptVersionOption,
 } from "@/lib/meeting-display";
@@ -51,6 +57,7 @@ export function TranscriptPane({
   transcriptVersions = [],
   activeVersionId,
   activateTranscriptVersion,
+  deleteTranscriptVersion,
   lastAsr,
   asrLanguage,
   downloadTranscript,
@@ -80,6 +87,10 @@ export function TranscriptPane({
 }) {
   const { t } = useI18n();
   const segmentRefs = useRef(new Map());
+  const toolsRef = useRef(null);
+  const versionMenuRef = useRef(null);
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const [versionMenuOpen, setVersionMenuOpen] = useState(false);
   const versions = useMemo(() => {
     if (Array.isArray(transcriptVersions) && transcriptVersions.length > 0) {
       return transcriptVersions;
@@ -87,6 +98,15 @@ export function TranscriptPane({
     return activeTranscriptVersion ? [activeTranscriptVersion] : [];
   }, [activeTranscriptVersion, transcriptVersions]);
   const selectedVersionId = activeVersionId || meeting?.active_version_id || activeTranscriptVersion?.id || "auto";
+  const selectedVersion = versions.find((version) => version.id === selectedVersionId) || activeTranscriptVersion;
+  const canDeleteSelectedVersion = Boolean(
+    selectedVersion
+      && selectedVersion.id
+      && selectedVersion.id !== "auto"
+      && !["queued", "running"].includes(selectedVersion.status),
+  );
+  const recognizedItems = useMemo(() => recognizedTranscriptItems(transcriptItems), [transcriptItems]);
+  const hasRecognizedTranscript = recognizedItems.length > 0;
   const transcriptDescription = useMemo(() => {
     const bits = [
       formatAsrDisplay(lastAsr, asrLanguage),
@@ -109,6 +129,7 @@ export function TranscriptPane({
   const activeSegmentId = useMemo(() => {
     if (!Number.isFinite(playbackPositionMs)) return "";
     const active = transcriptItems.find((segment) => {
+      if (isUnrecognizedTranscriptItem(segment)) return false;
       const range = segmentRange(segment);
       return playbackPositionMs >= range.start && playbackPositionMs <= range.end;
     });
@@ -122,26 +143,158 @@ export function TranscriptPane({
     node.scrollIntoView({ block: "center", behavior: "smooth" });
   }, [activeSegmentId]);
 
+  useEffect(() => {
+    if (!toolsOpen) return undefined;
+    const handlePointerDown = (event) => {
+      if (toolsRef.current?.contains(event.target)) return;
+      setToolsOpen(false);
+    };
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") setToolsOpen(false);
+    };
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [toolsOpen]);
+
+  useEffect(() => {
+    if (!versionMenuOpen) return undefined;
+    const handlePointerDown = (event) => {
+      if (versionMenuRef.current?.contains(event.target)) return;
+      setVersionMenuOpen(false);
+    };
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") setVersionMenuOpen(false);
+    };
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [versionMenuOpen]);
+
+  useEffect(() => {
+    if (recording) {
+      setToolsOpen(false);
+      setVersionMenuOpen(false);
+    }
+  }, [recording]);
+
+  const advancedActions = [
+    {
+      key: "asr",
+      label: t("重新识别"),
+      icon: <RefreshCcw size={15} />,
+      disabled: !meeting || !recognitionReady || reprocessWorking,
+      title: recognitionUnavailableReason || t("重新识别"),
+      onSelect: () => startReprocess("asr"),
+    },
+    {
+      key: "speaker",
+      label: t("重新校准说话人"),
+      icon: <Users size={15} />,
+      disabled: !meeting || reprocessWorking || !hasRecognizedTranscript,
+      title: t("重新校准说话人"),
+      onSelect: () => startReprocess("speaker"),
+    },
+    {
+      key: "repair",
+      label: t("自动校对文字"),
+      icon: <Sparkles size={15} />,
+      disabled: !meeting || reprocessWorking || !hasRecognizedTranscript,
+      title: t("自动校对文字"),
+      onSelect: () => startReprocess("repair"),
+    },
+    {
+      key: "merge",
+      label: t("整理段落"),
+      icon: <ListTree size={15} />,
+      disabled: !meeting || reprocessWorking || !hasRecognizedTranscript,
+      title: t("整理段落"),
+      onSelect: () => startReprocess("merge"),
+    },
+    {
+      key: "editable",
+      label: t("编辑副本"),
+      icon: <FilePenLine size={15} />,
+      disabled: !meeting || editableVersion || reprocessWorking || !hasRecognizedTranscript,
+      title: editableVersion ? t("当前已经是可编辑稿") : t("创建可编辑副本"),
+      onSelect: createEditableVersion,
+    },
+  ];
+
+  const selectAdvancedAction = (action) => {
+    if (action.disabled) return;
+    setToolsOpen(false);
+    action.onSelect?.();
+  };
+
+  const selectVersion = (version) => {
+    if (!version?.id || version.id === selectedVersionId) {
+      setVersionMenuOpen(false);
+      return;
+    }
+    setVersionMenuOpen(false);
+    activateTranscriptVersion?.(version.id);
+  };
+
   return (
     <section className="transcript-pane">
-      <div className="pane-header">
-        <div>
+      <div className="pane-header transcript-pane-header">
+        <div className="transcript-heading-row">
           <h2>{t("实时文字")}</h2>
-          <div className="transcript-meta-line">
+          <div className="transcript-meta-line" aria-label={t("选择稿件版本")}>
             {versions.length > 0 && (
-              <select
-                className="transcript-version-select"
-                value={selectedVersionId}
-                onChange={(event) => activateTranscriptVersion?.(event.target.value)}
-                disabled={!meeting || reprocessWorking || editBusy || versions.length < 2}
-                title={t("选择稿件版本")}
+              <div className="transcript-version-menu" ref={versionMenuRef}>
+                <button
+                  type="button"
+                  className="transcript-version-trigger"
+                  onClick={() => setVersionMenuOpen((value) => !value)}
+                  disabled={!meeting || reprocessWorking || editBusy || versions.length < 2}
+                  title={t("选择稿件版本")}
+                  aria-haspopup="listbox"
+                  aria-expanded={versionMenuOpen}
+                >
+                  <span>{transcriptVersionOption(selectedVersion || versions[0], t)}</span>
+                  <ChevronDown size={13} />
+                </button>
+                {versionMenuOpen && (
+                  <div className="transcript-version-dropdown" role="listbox" aria-label={t("选择稿件版本")}>
+                    {versions.map((version) => {
+                      const active = version.id === selectedVersionId;
+                      return (
+                        <button
+                          type="button"
+                          role="option"
+                          aria-selected={active}
+                          className={active ? "active" : ""}
+                          key={version.id}
+                          onClick={() => selectVersion(version)}
+                        >
+                          <span>{transcriptVersionOption(version, t)}</span>
+                          {active && <Check size={13} />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+            {canDeleteSelectedVersion && (
+              <button
+                type="button"
+                className="version-delete-button"
+                onClick={() => deleteTranscriptVersion?.(selectedVersion.id)}
+                disabled={!meeting || reprocessWorking || editBusy}
+                title={t("删除当前稿件")}
+                aria-label={t("删除当前稿件")}
               >
-                {versions.map((version) => (
-                  <option key={version.id} value={version.id}>
-                    {transcriptVersionOption(version, t)}
-                  </option>
-                ))}
-              </select>
+                <Trash2 size={13} />
+              </button>
             )}
             <span>{transcriptDescription}</span>
           </div>
@@ -149,51 +302,38 @@ export function TranscriptPane({
         <div className="pane-actions transcript-tools">
           {!recording && (
             <>
-            <button
-              className="playback-button"
-              onClick={() => startReprocess("asr")}
-              disabled={!meeting || !recognitionReady || reprocessWorking}
-              title={recognitionUnavailableReason || t("重新识别")}
-            >
-              <RefreshCcw size={15} />
-              <span>{t("重新识别")}</span>
-            </button>
-            <button
-              className="playback-button"
-              onClick={() => startReprocess("speaker")}
-              disabled={!meeting || reprocessWorking || transcriptItems.length === 0}
-              title={t("重新校准说话人")}
-            >
-              <Users size={15} />
-              <span>{t("重新校准说话人")}</span>
-            </button>
-            <button
-              className="playback-button"
-              onClick={() => startReprocess("repair")}
-              disabled={!meeting || reprocessWorking || transcriptItems.length === 0}
-              title={t("自动校对文字")}
-            >
-              <Sparkles size={15} />
-              <span>{t("自动校对文字")}</span>
-            </button>
-            <button
-              className="playback-button"
-              onClick={() => startReprocess("merge")}
-              disabled={!meeting || reprocessWorking || transcriptItems.length === 0}
-              title={t("整理段落")}
-            >
-              <ListTree size={15} />
-              <span>{t("整理段落")}</span>
-            </button>
-            <button
-              className="playback-button"
-              onClick={createEditableVersion}
-              disabled={!meeting || editableVersion || reprocessWorking || transcriptItems.length === 0}
-              title={editableVersion ? t("当前已经是可编辑稿") : t("创建可编辑副本")}
-            >
-              <FilePenLine size={15} />
-              <span>{t("编辑副本")}</span>
-            </button>
+            <div className="transcript-action-menu" ref={toolsRef}>
+              <button
+                className="playback-button transcript-menu-trigger"
+                type="button"
+                onClick={() => setToolsOpen((value) => !value)}
+                disabled={!meeting}
+                title={t("文字工具")}
+                aria-label={t("文字工具")}
+                aria-haspopup="menu"
+                aria-expanded={toolsOpen}
+              >
+                <CircleEllipsis size={15} />
+                <span>{t("文字工具")}</span>
+              </button>
+              {toolsOpen && (
+                <div className="transcript-action-dropdown" role="menu">
+                  {advancedActions.map((action) => (
+                    <button
+                      key={action.key}
+                      type="button"
+                      role="menuitem"
+                      disabled={action.disabled}
+                      title={action.title}
+                      onClick={() => selectAdvancedAction(action)}
+                    >
+                      {action.icon}
+                      <span>{action.label}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             <button
               className="playback-button transcript-download"
               onClick={downloadTranscript}
@@ -236,7 +376,10 @@ export function TranscriptPane({
             const parts = transcriptParts(segment);
             const range = segmentRange(segment);
             const timeText = formatOffset(range.start) || formatTime(segment.created_at);
+            const unrecognized = isUnrecognizedTranscriptItem(segment);
+            const rangeText = `${formatOffset(range.start)} - ${formatOffset(range.end)}${UNRECOGNIZED_TEXT}`;
             const isPartActive = (part) => {
+              if (unrecognized) return false;
               const startMs = Number(part.start_ms);
               const endMs = Number(part.end_ms);
               return Number.isFinite(playbackPositionMs)
@@ -245,25 +388,25 @@ export function TranscriptPane({
                 && playbackPositionMs >= startMs
                 && playbackPositionMs <= endMs;
             };
-            const active = segment.id === activeSegmentId || parts.some(isPartActive);
-            const editing = editingSegmentId === segment.id;
+            const active = !unrecognized && (segment.id === activeSegmentId || parts.some(isPartActive));
+            const editing = !unrecognized && editingSegmentId === segment.id;
             return (
               <article
-                className={`segment ${active ? "playing-now" : ""}`}
+                className={`segment ${active ? "playing-now" : ""} ${unrecognized ? "unrecognized" : ""}`}
                 key={segment.id}
                 ref={(node) => {
                   if (node) segmentRefs.current.set(segment.id, node);
                   else segmentRefs.current.delete(segment.id);
                 }}
-                onClick={(event) => playFromTranscript(event, segment.start_ms)}
-                title={t("从这里开始回放")}
+                onClick={unrecognized ? undefined : (event) => playFromTranscript(event, segment.start_ms)}
+                title={unrecognized ? t("这段音频没有识别到文字") : t("从这里开始回放")}
               >
                 <div className="segment-content">
                   <div className="segment-meta">
                     <div className="segment-meta-left">
                       <time>{timeText}</time>
-                      <span>{segment.speaker || "Speaker 1"}</span>
-                      <small>{segment.confidence ? `${Math.round(segment.confidence * 100)}%` : ""}</small>
+                      {!unrecognized && <span>{segment.speaker || "Speaker 1"}</span>}
+                      {!unrecognized && <small>{segment.confidence ? `${Math.round(segment.confidence * 100)}%` : ""}</small>}
                     </div>
                   </div>
                   {editing ? (
@@ -282,32 +425,37 @@ export function TranscriptPane({
                     </div>
                   ) : (
                     <p className="segment-text">
-                      {parts.map((part, index) => (
-                        <span
-                          className={`segment-part ${isPartActive(part) ? "playing-part" : ""}`}
-                          key={part.id || `${segment.id}-${index}`}
-                          onClick={(event) => playFromTranscript(event, part.start_ms)}
-                          onKeyDown={(event) => {
-                            if (event.key === "Enter" || event.key === " ") {
-                              playFromTranscript(event, part.start_ms);
-                            }
-                          }}
-                          role="button"
-                          tabIndex={0}
-                          title={formatOffset(part.start_ms)
-                            ? t("从 {time} 播放", { time: formatOffset(part.start_ms) })
-                            : t("从这里播放")}
-                        >
-                          {part.text}
-                        </span>
-                      ))}
+                      {unrecognized ? (
+                        <span>{rangeText}</span>
+                      ) : (
+                        parts.map((part, index) => (
+                          <span
+                            className={`segment-part ${isPartActive(part) ? "playing-part" : ""}`}
+                            key={part.id || `${segment.id}-${index}`}
+                            onClick={(event) => playFromTranscript(event, part.start_ms)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" || event.key === " ") {
+                                playFromTranscript(event, part.start_ms);
+                              }
+                            }}
+                            role="button"
+                            tabIndex={0}
+                            title={formatOffset(part.start_ms)
+                              ? t("从 {time} 播放", { time: formatOffset(part.start_ms) })
+                              : t("从这里播放")}
+                          >
+                            {part.text}
+                          </span>
+                        ))
+                      )}
                     </p>
                   )}
-                  {segment.segment_count > 1 && (
+                  {!unrecognized && segment.segment_count > 1 && (
                     <div className="segment-detail">{t("{count} 个识别小段已整理", { count: segment.segment_count })}</div>
                   )}
                 </div>
-                <div className="segment-actions">
+                {!unrecognized && (
+                  <div className="segment-actions">
                   <button
                     className="segment-action-button"
                     onClick={(event) => playFromTranscript(event, segment.start_ms)}
@@ -348,7 +496,8 @@ export function TranscriptPane({
                         </button>
                       </>
                     )}
-                </div>
+                  </div>
+                )}
               </article>
             );
           })

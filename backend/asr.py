@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import gc
+import os
 import re
 import subprocess
-import gc
+import wave
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -13,6 +16,7 @@ from .config import (
     ASR_LANGUAGE,
     ASR_MODEL,
     ASR_MODEL_DIR,
+    FUNASR_MODEL_DIR,
     MLX_ASR_MODEL_DIR,
 )
 from .media_tools import ffmpeg_path
@@ -21,6 +25,9 @@ from .media_tools import ffmpeg_path
 SAMPLE_RATE = 16000
 ASR_CONTEXT_MAX_CHARS = 360
 ASR_CONTEXT_MIN_SPEECH_MS = 1200
+PROMPT_ECHO_MIN_CHARS = 10
+PROMPT_ECHO_COVERAGE = 0.88
+PROMPT_ECHO_RATIO = 0.45
 MIXED_LANGUAGE_PROMPT = (
     "这是会议录音转写。请使用简体中文；如果听到英文单词、产品名、"
     "人名、代码、模型名或缩写，请保留原始英文，不要翻译或音译。"
@@ -33,6 +40,10 @@ HALLUCINATION_MARKERS = (
     "请保留原始英文",
     "保留原始英文单词",
     "不要翻译或音译",
+    "这是一次会议录音转写",
+    "会议转写上下文",
+    "请尽量保留原语言",
+    "不要把英文或其他语言翻译成中文",
     "请建议一个任务",
     "欢迎订阅",
     "请不客点赞",
@@ -42,6 +53,15 @@ HALLUCINATION_MARKERS = (
     "打赏支持明镜",
     "点点栏目",
     "明镜与点点",
+)
+PROMPT_ECHO_MARKERS = (
+    "这是一次会议录音转写",
+    "会议转写上下文",
+    "请尽量保留原语言",
+    "不要把英文或其他语言翻译成中文",
+    "transcribe each utterance",
+    "do not translate",
+    "preserve code-switching",
 )
 
 MLX_MODEL_REPOS = {
@@ -185,16 +205,13 @@ class FasterWhisperASR:
             requested_language = None
 
         vad_segments = self.detect_speech(wav_path)
-        if not vad_segments:
-            return self.empty_result(language, requested_language, auto_language or mixed_language)
-
         speech_ms = sum(max(0, int(item["end_ms"]) - int(item["start_ms"])) for item in vad_segments)
         initial_prompt = self.clean_context_prompt(context_prompt) if speech_ms >= ASR_CONTEXT_MIN_SPEECH_MS else None
 
         segments_iter, info = model.transcribe(
             str(wav_path),
             language=requested_language,
-            vad_filter=True,
+            vad_filter=bool(vad_segments),
             beam_size=5,
             temperature=0.0,
             no_speech_threshold=0.6,
@@ -216,6 +233,8 @@ class FasterWhisperASR:
             avg_logprob = getattr(item, "avg_logprob", None)
             compression_ratio = getattr(item, "compression_ratio", None)
             duration_ms = int(float(item.end or 0.0) * 1000) - int(float(item.start or 0.0) * 1000)
+            if self.is_prompt_echo(text, initial_prompt):
+                continue
             if self.is_likely_hallucination(
                 text,
                 no_speech_prob,
@@ -332,6 +351,34 @@ class FasterWhisperASR:
                     return True
                 index += 1
         return False
+
+    def is_prompt_echo(self, text: str, context_prompt: Optional[str]) -> bool:
+        compact_text = self.compact_prompt_echo_text(text)
+        compact_prompt = self.compact_prompt_echo_text(context_prompt or "")
+        if (
+            len(compact_text) < PROMPT_ECHO_MIN_CHARS
+            or len(compact_prompt) < PROMPT_ECHO_MIN_CHARS
+        ):
+            return False
+        if compact_text in compact_prompt or compact_prompt in compact_text:
+            return True
+
+        markers = tuple(
+            item
+            for item in (self.compact_prompt_echo_text(marker) for marker in PROMPT_ECHO_MARKERS)
+            if item
+        )
+        if not any(marker in compact_text for marker in markers):
+            return False
+
+        matcher = SequenceMatcher(None, compact_text, compact_prompt)
+        matched_chars = sum(block.size for block in matcher.get_matching_blocks())
+        coverage = matched_chars / max(1, len(compact_text))
+        return coverage >= PROMPT_ECHO_COVERAGE and matcher.ratio() >= PROMPT_ECHO_RATIO
+
+    def compact_prompt_echo_text(self, value: Any) -> str:
+        simplified = self.to_simplified(str(value or "")).lower()
+        return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", simplified)
 
     def clean_context_prompt(self, context_prompt: str) -> Optional[str]:
         text = re.sub(r"\s+", " ", str(context_prompt or "")).strip()
@@ -508,9 +555,6 @@ class MlxWhisperASR(FasterWhisperASR):
             requested_language = None
 
         vad_segments = self.detect_speech(wav_path)
-        if not vad_segments:
-            return self.empty_result(language, requested_language, auto_language or mixed_language)
-
         speech_ms = sum(max(0, int(item["end_ms"]) - int(item["start_ms"])) for item in vad_segments)
         initial_prompt = self.clean_context_prompt(context_prompt) if speech_ms >= ASR_CONTEXT_MIN_SPEECH_MS else None
 
@@ -546,6 +590,8 @@ class MlxWhisperASR(FasterWhisperASR):
             avg_logprob = item.get("avg_logprob")
             compression_ratio = item.get("compression_ratio")
             duration_ms = int(float(item.get("end") or 0.0) * 1000) - int(float(item.get("start") or 0.0) * 1000)
+            if self.is_prompt_echo(text, initial_prompt):
+                continue
             if self.is_likely_hallucination(
                 text,
                 no_speech_prob,
@@ -579,3 +625,215 @@ class MlxWhisperASR(FasterWhisperASR):
             "segments": segments,
             "text": "\n".join(segment["text"] for segment in segments),
         }
+
+
+class FunASRASR(FasterWhisperASR):
+    def __init__(
+        self,
+        model_name: str,
+        model_id: str,
+        model_dir: Path = FUNASR_MODEL_DIR,
+        language: Optional[str] = ASR_LANGUAGE,
+        display_name: Optional[str] = None,
+        vad_model: str = "fsmn-vad",
+        punc_model: str = "ct-punc-c",
+        trust_remote_code: bool = False,
+    ) -> None:
+        super().__init__(
+            model_name=display_name or model_name,
+            model_dir=model_dir,
+            device=os.environ.get("VOICE_MEETING_FUNASR_DEVICE", "cpu"),
+            compute_type="torch",
+            language=language,
+        )
+        self.model_id = model_id
+        self.vad_model = vad_model
+        self.punc_model = punc_model
+        self.trust_remote_code = trust_remote_code
+
+    def status(self) -> Dict[str, Any]:
+        return {
+            "backend": "funasr",
+            "model": self.model_name,
+            "model_id": self.model_id,
+            "device": self.device,
+            "compute_type": self.compute_type,
+            "loaded": self.loaded,
+            "loading": self.loading,
+            "language": self.language or "auto",
+            "last_error": self.last_error,
+        }
+
+    def _configure_cache(self) -> None:
+        self.model_dir.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("MODELSCOPE_CACHE", str(self.model_dir / "modelscope"))
+        os.environ.setdefault("HF_HOME", str(self.model_dir / "huggingface"))
+
+    def _load_model(self) -> Any:
+        if self._model is not None:
+            return self._model
+        self.loading = True
+        self.last_error = ""
+        try:
+            from funasr import AutoModel
+        except Exception as exc:
+            self.loading = False
+            self.last_error = str(exc)
+            raise ASRUnavailable(
+                "funasr is not installed. Run scripts/setup.sh first."
+            ) from exc
+
+        try:
+            self._configure_cache()
+            kwargs: Dict[str, Any] = {
+                "model": self.model_id,
+                "device": self.device,
+                "disable_update": True,
+            }
+            if self.vad_model:
+                kwargs["vad_model"] = self.vad_model
+                kwargs["vad_kwargs"] = {"max_single_segment_time": 30000}
+            if self.punc_model:
+                kwargs["punc_model"] = self.punc_model
+            if self.trust_remote_code:
+                kwargs["trust_remote_code"] = True
+            self._model = AutoModel(**kwargs)
+            self.loaded = True
+            return self._model
+        except Exception as exc:
+            self.last_error = str(exc)
+            raise
+        finally:
+            self.loading = False
+
+    def unload(self) -> None:
+        super().unload()
+        try:
+            import torch
+
+            if getattr(torch, "cuda", None) and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+    def transcribe(
+        self,
+        wav_path: Path,
+        language: Optional[str] = None,
+        context_prompt: str = "",
+    ) -> Dict[str, Any]:
+        model = self.require_loaded()
+        vad_segments = self.detect_speech(wav_path)
+
+        kwargs: Dict[str, Any] = {
+            "input": str(wav_path),
+            "batch_size_s": 300,
+            "merge_vad": True,
+        }
+        hotword = self.clean_context_prompt(context_prompt)
+        if hotword:
+            kwargs["hotword"] = hotword
+
+        result = model.generate(**kwargs)
+        segments = self._segments_from_result(result, wav_path)
+        if hotword:
+            segments = [
+                segment
+                for segment in segments
+                if not self.is_prompt_echo(segment.get("text", ""), hotword)
+            ]
+        return {
+            "requested_language": language or self.language or "auto",
+            "backend": "funasr",
+            "model": self.model_name,
+            "language": self._language_from_request(language),
+            "language_probability": None,
+            "top_languages": [],
+            "multilingual": True,
+            "vad_segments": vad_segments,
+            "segments": segments,
+            "text": "\n".join(segment["text"] for segment in segments),
+        }
+
+    def _language_from_request(self, language: Optional[str]) -> Optional[str]:
+        requested = language or self.language
+        if requested in {None, "auto", "multilingual", "mixed", "zh-en", "bilingual"}:
+            return None
+        return requested
+
+    def _segments_from_result(self, result: Any, wav_path: Path) -> List[Dict[str, Any]]:
+        records = result if isinstance(result, list) else [result]
+        segments: List[Dict[str, Any]] = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            sentence_info = record.get("sentence_info") or record.get("sentences") or []
+            for sentence in sentence_info:
+                if not isinstance(sentence, dict):
+                    continue
+                text = self.clean_funasr_text(sentence.get("text") or sentence.get("raw_text") or "")
+                if not text:
+                    continue
+                start_ms, end_ms = self._sentence_range(sentence)
+                segments.append(
+                    {
+                        "start_ms": start_ms,
+                        "end_ms": end_ms,
+                        "text": text,
+                        "confidence": None,
+                    }
+                )
+            if segments:
+                continue
+            text = self.clean_funasr_text(record.get("text") or "")
+            if text:
+                duration_ms = self._wav_duration_ms(wav_path)
+                segments.append(
+                    {
+                        "start_ms": 0,
+                        "end_ms": max(duration_ms, 1000),
+                        "text": text,
+                        "confidence": None,
+                    }
+                )
+        return segments
+
+    def _sentence_range(self, sentence: Dict[str, Any]) -> tuple[int, int]:
+        start = sentence.get("start") or sentence.get("start_ms")
+        end = sentence.get("end") or sentence.get("end_ms")
+        timestamp = sentence.get("timestamp")
+        if (start is None or end is None) and isinstance(timestamp, list) and timestamp:
+            first = timestamp[0]
+            last = timestamp[-1]
+            if isinstance(first, (list, tuple)) and len(first) >= 2:
+                start = first[0]
+            if isinstance(last, (list, tuple)) and len(last) >= 2:
+                end = last[1]
+        start_ms = self._normalize_time_ms(start)
+        end_ms = self._normalize_time_ms(end)
+        if end_ms <= start_ms:
+            end_ms = start_ms + 1000
+        return start_ms, end_ms
+
+    def _normalize_time_ms(self, value: Any) -> int:
+        try:
+            numeric = float(value)
+        except Exception:
+            return 0
+        if numeric < 100:
+            numeric *= 1000
+        return max(0, int(round(numeric)))
+
+    def _wav_duration_ms(self, wav_path: Path) -> int:
+        try:
+            with wave.open(str(wav_path), "rb") as handle:
+                frames = handle.getnframes()
+                rate = handle.getframerate() or SAMPLE_RATE
+            return int(frames * 1000 / rate)
+        except Exception:
+            return 0
+
+    def clean_funasr_text(self, text: Any) -> str:
+        value = re.sub(r"<\|[^>]+?\|>", "", str(text or ""))
+        value = re.sub(r"\s+", " ", value).strip()
+        return self.to_simplified(value)

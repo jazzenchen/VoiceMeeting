@@ -1,4 +1,5 @@
 export const WAVE_PATTERN = [0.35, 0.62, 0.48, 0.84, 0.58, 1.0, 0.72, 0.42, 0.68, 0.92, 0.54, 0.78];
+export const UNRECOGNIZED_TEXT = "（未识别到）";
 
 export const LANGUAGE_OPTIONS = [
   ["auto", "自动多语种"],
@@ -137,7 +138,12 @@ export function transcriptVersionName(version, fallbackId = "auto") {
 export function transcriptVersionOption(version, t = (value) => value) {
   const name = transcriptVersionName(version, version?.id);
   const time = formatTime(version?.created_at);
-  return time ? `${t(name)} · ${time}` : t(name);
+  const statusText = version?.status === "error"
+    ? t("失败")
+    : ["queued", "running"].includes(version?.status)
+      ? t("处理中")
+      : "";
+  return [t(name), time, statusText].filter(Boolean).join(" · ");
 }
 
 export function transcriptVersionHint(version, editable, t = (value, values) => value) {
@@ -153,6 +159,13 @@ export function asrModelName(model) {
   if (String(model || "").startsWith("mlx-")) {
     return `MLX ${asrModelName(String(model).slice(4))}`;
   }
+  if (String(model || "").startsWith("funasr-")) {
+    const names = {
+      "funasr-sensevoice-small": "FunASR SenseVoice",
+      "funasr-paraformer-zh": "FunASR Paraformer",
+    };
+    return names[model] || `FunASR ${String(model).replace(/^funasr-/, "")}`;
+  }
   const names = {
     tiny: "轻量识别",
     base: "快速识别",
@@ -162,6 +175,20 @@ export function asrModelName(model) {
     "large-v3-turbo": "高精度加速",
   };
   return names[model] || model;
+}
+
+export function asrBackendLabel(value) {
+  if (value === "mlx") return "Mac MLX 模型";
+  if (value === "funasr") return "FunASR 模型";
+  if (value === "faster-whisper") return "通用模型";
+  return value || "识别模型";
+}
+
+export function asrBackendForModel(model) {
+  const name = String(model || "");
+  if (name.startsWith("mlx-")) return "mlx";
+  if (name.startsWith("funasr-")) return "funasr";
+  return "faster-whisper";
 }
 
 export function meetingStatusName(statusValue) {
@@ -190,7 +217,7 @@ export function assistantRouteText(llm) {
   if (!llm?.transport && !llm?.route && !llm?.provider) return "待连接";
   const route = String(llm?.route || llm?.transport || llm?.provider || "");
   if (llm?.provider === "openai-chat" || route.includes("openai-chat")) {
-    return llm?.model ? `接口 · ${llm.model}` : "接口";
+    return llm?.model ? `LLM 模型接口 · ${llm.model}` : "LLM 模型接口";
   }
   if (route.includes("web-chat")) return "Codex 通道";
   return "VibeAround";
@@ -203,7 +230,7 @@ export function assistantStatusText(llm) {
 }
 
 export function llmProviderLabel(value) {
-  if (value === "openai-chat") return "接口";
+  if (value === "openai-chat") return "LLM 模型接口";
   return "VibeAround";
 }
 
@@ -268,4 +295,20 @@ export function transcriptParts(item) {
       end_ms: item?.end_ms,
     },
   ];
+}
+
+export function isUnrecognizedTranscriptText(value) {
+  return String(value || "").trim() === UNRECOGNIZED_TEXT;
+}
+
+export function isUnrecognizedTranscriptItem(item) {
+  const parts = transcriptParts(item);
+  if (parts.length > 0 && parts.every((part) => isUnrecognizedTranscriptText(part.text) || isUnrecognizedTranscriptText(part.raw_text))) {
+    return true;
+  }
+  return isUnrecognizedTranscriptText(item?.text) || isUnrecognizedTranscriptText(item?.raw_text);
+}
+
+export function recognizedTranscriptItems(items = []) {
+  return items.filter((item) => !isUnrecognizedTranscriptItem(item));
 }

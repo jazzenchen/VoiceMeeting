@@ -39,6 +39,7 @@ DB_PATH = Path(os.environ.get("VOICE_MEETING_DB", DATA_DIR / "voice_meeting.sqli
 ASR_MODEL = os.environ.get("VOICE_MEETING_ASR_MODEL", "small")
 ASR_MODEL_DIR = Path(os.environ.get("VOICE_MEETING_ASR_MODEL_DIR", MODELS_DIR / "faster-whisper"))
 MLX_ASR_MODEL_DIR = Path(os.environ.get("VOICE_MEETING_MLX_ASR_MODEL_DIR", MODELS_DIR / "mlx-whisper"))
+FUNASR_MODEL_DIR = Path(os.environ.get("VOICE_MEETING_FUNASR_MODEL_DIR", MODELS_DIR / "funasr"))
 ASR_DEVICE = os.environ.get("VOICE_MEETING_ASR_DEVICE", "cpu")
 ASR_COMPUTE_TYPE = os.environ.get("VOICE_MEETING_ASR_COMPUTE_TYPE", "int8")
 ASR_LANGUAGE = os.environ.get("VOICE_MEETING_ASR_LANGUAGE") or None
@@ -216,3 +217,4 @@ def ensure_runtime_dirs() -> None:
     MEETINGS_DIR.mkdir(parents=True, exist_ok=True)
     ASR_MODEL_DIR.mkdir(parents=True, exist_ok=True)
     MLX_ASR_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    FUNASR_MODEL_DIR.mkdir(parents=True, exist_ok=True)

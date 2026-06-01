@@ -1,7 +1,6 @@
-import { RefreshCcw } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
 
-export function StartupBanner({ serviceReady, serviceStarting, backendDetail, onRefresh }) {
+export function StartupBanner({ serviceReady, serviceStarting, backendDetail }) {
   const { t } = useI18n();
   if (serviceReady) return null;
 
@@ -14,13 +13,9 @@ export function StartupBanner({ serviceReady, serviceStarting, backendDetail, on
           {backendDetail
             || (serviceStarting
               ? t("首次打开会解包运行环境，稍等后自动恢复。")
-              : t("正在自动重连，也可以手动刷新状态。"))}
+              : t("状态通道正在自动重连。"))}
         </span>
       </div>
-      <button className="mini-button text-mini" onClick={onRefresh} title={t("刷新本地服务状态")}>
-        <RefreshCcw size={13} />
-        <span>{t("刷新")}</span>
-      </button>
     </div>
   );
 }
