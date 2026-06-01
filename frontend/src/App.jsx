@@ -576,6 +576,28 @@ function App() {
   }, [applyRecordingConfigStatus]);
 
   useEffect(() => {
+    let cancelled = false;
+    api("/api/recording-config")
+      .then((data) => {
+        if (cancelled) return;
+        serviceReadyOnceRef.current = true;
+        applyRecordingConfigStatus(data);
+        setStatus((current) => ({ ...current, backend: "ready", backendDetail: "" }));
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setStatus((current) => ({
+          ...current,
+          backend: serviceReadyOnceRef.current ? "offline" : "starting",
+          backendDetail: userFriendlyError(err.message) || "等待本地语音服务启动。",
+        }));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [applyRecordingConfigStatus]);
+
+  useEffect(() => {
     const streamModelCatalog = (settingsOpen && settingsTab === "models") || Boolean(activeModelDownload);
     if (!streamModelCatalog) return undefined;
     let socket = null;
@@ -1301,7 +1323,6 @@ function App() {
     async (blob, durationMs = MAX_SEGMENT_MS, metadata = {}) => {
       const id = meetingIdRef.current;
       if (!id || !blob || blob.size === 0) return;
-      if (stopRequestedRef.current) return;
       const activeConfig = clampRecordingConfig(recordingConfigRef.current);
       const controller = new AbortController();
       activeUploadControllersRef.current.add(controller);
@@ -1333,7 +1354,6 @@ function App() {
           body: form,
           signal: controller.signal,
         });
-        if (stopRequestedRef.current) return;
         setLastAsr(data.asr || null);
         if (data.runtime) setRuntimeStatus(data.runtime);
         setPipelineStatus("文字已更新");
@@ -1667,12 +1687,6 @@ function App() {
     setActiveMicLabel("");
     setVadLevel(0);
     setPipelineStatus("已停止");
-    for (const controller of activeUploadControllersRef.current) {
-      controller.abort();
-    }
-    activeUploadControllersRef.current.clear();
-    uploadChainRef.current = Promise.resolve();
-    setPendingChunks(0);
     setRuntimeStatus((current) => (
       current
         ? { ...current, active_chunks: [], has_active_chunks: false }
@@ -1685,9 +1699,16 @@ function App() {
       } catch {
         // The local state still carries the recording outcome.
       }
+      try {
+        await uploadChainRef.current;
+        await refreshMeeting(stoppedMeetingId);
+        await refreshMeetings();
+      } catch (err) {
+        setError(userFriendlyError(err.message));
+      }
       await runFinalize(stoppedMeetingId, { allowWhileRecording: true });
     }
-  }, [closeActiveSegment, recording, runFinalize]);
+  }, [closeActiveSegment, recording, refreshMeeting, refreshMeetings, runFinalize]);
 
   const finalize = useCallback(async () => {
     const id = meetingIdRef.current || meeting?.id;
