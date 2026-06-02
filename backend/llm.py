@@ -4,7 +4,10 @@ import json
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional
 
-import httpx
+try:
+    from litellm import acompletion
+except Exception:  # pragma: no cover - handled at runtime for packaged installs
+    acompletion = None
 
 from .config import DATA_DIR
 from .vibearound import VibeAroundClient
@@ -12,14 +15,19 @@ from .vibearound import VibeAroundClient
 
 LLM_CONFIG_PATH = DATA_DIR / "llm_config.json"
 LLM_PROVIDER_VIBEAROUND = "vibearound"
-LLM_PROVIDER_OPENAI_CHAT = "openai-chat"
+LLM_PROVIDER_LITELLM = "litellm"
+
+
+class LLMConfigError(ValueError):
+    pass
 
 
 def _default_config() -> Dict[str, Any]:
     return {
         "provider": LLM_PROVIDER_VIBEAROUND,
-        "openai_chat": {
-            "base_url": "",
+        "litellm": {
+            "preset": "openai",
+            "api_base": "",
             "api_key": "",
             "model": "",
         },
@@ -27,58 +35,78 @@ def _default_config() -> Dict[str, Any]:
 
 
 def _clean_provider(value: Any) -> str:
-    provider = str(value or LLM_PROVIDER_VIBEAROUND).strip().lower()
-    if provider in {"openai", "openai_chat", "interface", "api"}:
-        return LLM_PROVIDER_OPENAI_CHAT
-    if provider == LLM_PROVIDER_OPENAI_CHAT:
-        return LLM_PROVIDER_OPENAI_CHAT
-    return LLM_PROVIDER_VIBEAROUND
+    provider = str(value or "").strip().lower()
+    if provider in {LLM_PROVIDER_VIBEAROUND, LLM_PROVIDER_LITELLM}:
+        return provider
+    raise LLMConfigError("LLM 配置解析失败：provider 必须是 vibearound 或 litellm。")
 
 
-def _clean_openai_chat(value: Any) -> Dict[str, str]:
-    data = value if isinstance(value, dict) else {}
+def _clean_litellm(value: Any) -> Dict[str, str]:
+    if not isinstance(value, dict):
+        raise LLMConfigError("LLM 配置解析失败：litellm 必须是对象。")
     return {
-        "base_url": str(data.get("base_url") or data.get("baseUrl") or "").strip(),
-        "api_key": str(data.get("api_key") or data.get("apiKey") or "").strip(),
-        "model": str(data.get("model") or "").strip(),
+        "preset": str(value.get("preset") or "custom").strip(),
+        "api_base": str(value.get("api_base") or value.get("apiBase") or "").strip(),
+        "api_key": str(value.get("api_key") or value.get("apiKey") or "").strip(),
+        "model": str(value.get("model") or "").strip(),
     }
 
 
 def _merge_config(raw: Any) -> Dict[str, Any]:
-    defaults = _default_config()
-    data = raw if isinstance(raw, dict) else {}
-    openai_chat = {**defaults["openai_chat"], **_clean_openai_chat(data.get("openai_chat"))}
+    if not isinstance(raw, dict):
+        raise LLMConfigError("LLM 配置解析失败：根节点必须是对象。")
+    provider = _clean_provider(raw.get("provider"))
+    if "litellm" not in raw:
+        raise LLMConfigError("LLM 配置解析失败：缺少 litellm 配置。")
+    litellm_config = _clean_litellm(raw.get("litellm"))
+    if provider == LLM_PROVIDER_LITELLM and not litellm_config["model"]:
+        raise LLMConfigError("LLM 配置解析失败：LiteLLM 模型不能为空。")
     return {
-        "provider": _clean_provider(data.get("provider")),
-        "openai_chat": openai_chat,
+        "provider": provider,
+        "litellm": litellm_config,
     }
 
 
-class OpenAIChatClient:
-    def __init__(self, base_url: str, api_key: str, model: str) -> None:
-        self.base_url = base_url.rstrip("/")
-        self.api_key = api_key
+class LiteLLMClient:
+    def __init__(self, model: str, api_key: str = "", api_base: str = "") -> None:
         self.model = model
+        self.api_key = api_key
+        self.api_base = self._normalize_api_base(api_base)
 
-    def _chat_url(self) -> str:
-        if self.base_url.endswith("/chat/completions"):
-            return self.base_url
-        if self.base_url.endswith("/v1"):
-            return f"{self.base_url}/chat/completions"
-        return f"{self.base_url}/v1/chat/completions"
+    def _normalize_api_base(self, value: str) -> str:
+        api_base = value.strip().rstrip("/")
+        if api_base.endswith("/chat/completions"):
+            api_base = api_base[: -len("/chat/completions")]
+        return api_base
 
-    def _headers(self) -> Dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-
-    def _payload(self, messages: List[Dict[str, str]], stream: bool) -> Dict[str, Any]:
-        return {
+    def _completion_kwargs(
+        self,
+        messages: List[Dict[str, str]],
+        timeout: float,
+        stream: bool,
+    ) -> Dict[str, Any]:
+        kwargs: Dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "stream": stream,
+            "timeout": timeout,
         }
+        if self.api_key:
+            kwargs["api_key"] = self.api_key
+        if self.api_base:
+            kwargs["base_url"] = self.api_base
+        return kwargs
+
+    def _value(self, item: Any, key: str) -> Any:
+        if isinstance(item, dict):
+            return item.get(key)
+        return getattr(item, key, None)
+
+    def _first_choice(self, data: Any) -> Any:
+        choices = self._value(data, "choices") or []
+        if not choices:
+            return None
+        return choices[0]
 
     def _content_to_text(self, content: Any) -> str:
         if isinstance(content, str):
@@ -93,65 +121,34 @@ class OpenAIChatClient:
         return ""
 
     async def chat(self, messages: List[Dict[str, str]], timeout: float = 90.0) -> str:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                self._chat_url(),
-                headers=self._headers(),
-                content=json.dumps(self._payload(messages, stream=False), ensure_ascii=False),
-            )
-            response.raise_for_status()
-            data = response.json()
-
-        choices = data.get("choices") or []
-        if not choices:
-            raise RuntimeError("OpenAI Chat 接口没有返回 choices。")
-        message = choices[0].get("message") or {}
-        content = self._content_to_text(message.get("content"))
+        if acompletion is None:
+            raise RuntimeError("LiteLLM 未安装，请重新安装应用依赖。")
+        response = await acompletion(**self._completion_kwargs(messages, timeout, stream=False))
+        choice = self._first_choice(response)
+        if choice is None:
+            raise RuntimeError("LiteLLM 接口没有返回 choices。")
+        message = self._value(choice, "message") or {}
+        content = self._content_to_text(self._value(message, "content"))
         if content:
             return content
-        raise RuntimeError("OpenAI Chat 接口没有返回可用内容。")
+        raise RuntimeError("LiteLLM 接口没有返回可用内容。")
 
     async def chat_stream(
         self,
         messages: List[Dict[str, str]],
         timeout: float = 90.0,
     ) -> AsyncIterator[str]:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream(
-                "POST",
-                self._chat_url(),
-                headers=self._headers(),
-                content=json.dumps(self._payload(messages, stream=True), ensure_ascii=False),
-            ) as response:
-                response.raise_for_status()
-                content_type = response.headers.get("content-type", "")
-                if "text/event-stream" not in content_type:
-                    raw = await response.aread()
-                    data = json.loads(raw.decode("utf-8"))
-                    choices = data.get("choices") or []
-                    if not choices:
-                        raise RuntimeError("OpenAI Chat 接口没有返回 choices。")
-                    content = self._content_to_text((choices[0].get("message") or {}).get("content"))
-                    if content:
-                        yield content
-                    return
-
-                async for line in response.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if not data or data == "[DONE]":
-                        if data == "[DONE]":
-                            break
-                        continue
-                    event = json.loads(data)
-                    choices = event.get("choices") or []
-                    if not choices:
-                        continue
-                    delta = choices[0].get("delta") or {}
-                    content = self._content_to_text(delta.get("content"))
-                    if content:
-                        yield content
+        if acompletion is None:
+            raise RuntimeError("LiteLLM 未安装，请重新安装应用依赖。")
+        response = await acompletion(**self._completion_kwargs(messages, timeout, stream=True))
+        async for event in response:
+            choice = self._first_choice(event)
+            if choice is None:
+                continue
+            delta = self._value(choice, "delta") or {}
+            content = self._content_to_text(self._value(delta, "content"))
+            if content:
+                yield content
 
 
 class LLMManager:
@@ -162,9 +159,19 @@ class LLMManager:
     def _read_config(self) -> Dict[str, Any]:
         try:
             raw = json.loads(self.config_path.read_text())
+        except FileNotFoundError:
+            return _default_config()
+        except json.JSONDecodeError as exc:
+            raise LLMConfigError(f"LLM 配置解析失败：JSON 格式错误（第 {exc.lineno} 行）。") from exc
         except Exception:
-            raw = {}
+            raise LLMConfigError("LLM 配置解析失败：无法读取配置文件。")
         return _merge_config(raw)
+
+    def _read_config_or_default(self) -> tuple[Dict[str, Any], str]:
+        try:
+            return self._read_config(), ""
+        except LLMConfigError as exc:
+            return _default_config(), str(exc)
 
     def _write_config(self, config: Dict[str, Any]) -> None:
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -175,78 +182,74 @@ class LLMManager:
             pass
 
     def public_config(self) -> Dict[str, Any]:
-        config = self._read_config()
-        openai_chat = config["openai_chat"]
+        config, error = self._read_config_or_default()
+        litellm_config = config["litellm"]
         return {
             "provider": config["provider"],
-            "openai_chat": {
-                "base_url": openai_chat["base_url"],
-                "model": openai_chat["model"],
-                "has_api_key": bool(openai_chat["api_key"]),
+            "litellm": {
+                "preset": litellm_config["preset"],
+                "api_base": litellm_config["api_base"],
+                "model": litellm_config["model"],
+                "has_api_key": bool(litellm_config["api_key"]),
             },
+            "config_error": error,
         }
 
     def save_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        current = self._read_config()
+        current, _ = self._read_config_or_default()
         provider = _clean_provider(payload.get("provider"))
-        incoming_openai = _clean_openai_chat(payload.get("openai_chat"))
-        openai_chat = {
-            "base_url": incoming_openai["base_url"] or current["openai_chat"]["base_url"],
-            "api_key": incoming_openai["api_key"] or current["openai_chat"]["api_key"],
-            "model": incoming_openai["model"] or current["openai_chat"]["model"],
+        incoming_litellm = _clean_litellm(payload.get("litellm"))
+        current_litellm = current["litellm"]
+        litellm_config = {
+            "preset": incoming_litellm["preset"] or current_litellm["preset"],
+            "api_base": incoming_litellm["api_base"],
+            "api_key": incoming_litellm["api_key"] or current_litellm["api_key"],
+            "model": incoming_litellm["model"],
         }
 
-        if provider == LLM_PROVIDER_OPENAI_CHAT:
-            missing = [
-                label
-                for label, value in (
-                    ("baseurl", openai_chat["base_url"]),
-                    ("api key", openai_chat["api_key"]),
-                    ("model", openai_chat["model"]),
-                )
-                if not value
-            ]
-            if missing:
-                raise ValueError(f"接口配置缺少：{'、'.join(missing)}。")
+        if provider == LLM_PROVIDER_LITELLM and not litellm_config["model"]:
+            raise ValueError("LiteLLM 模型不能为空。")
 
         config = {
             "provider": provider,
-            "openai_chat": openai_chat,
+            "litellm": litellm_config,
         }
         self._write_config(config)
         return self.public_config()
 
-    def _openai_client(self) -> OpenAIChatClient:
-        config = self._read_config()["openai_chat"]
-        missing = [
-            label
-            for label, value in (
-                ("baseurl", config["base_url"]),
-                ("api key", config["api_key"]),
-                ("model", config["model"]),
-            )
-            if not value
-        ]
-        if missing:
-            raise RuntimeError(f"接口配置缺少：{'、'.join(missing)}。")
-        return OpenAIChatClient(config["base_url"], config["api_key"], config["model"])
+    def _litellm_client(self) -> LiteLLMClient:
+        config = self._read_config()["litellm"]
+        if not config["model"]:
+            raise RuntimeError("LiteLLM 模型不能为空。")
+        return LiteLLMClient(config["model"], config["api_key"], config["api_base"])
 
     def active_provider(self) -> str:
         return self._read_config()["provider"]
 
     def describe(self) -> Dict[str, Any]:
-        config = self._read_config()
-        if config["provider"] == LLM_PROVIDER_OPENAI_CHAT:
-            openai_chat = config["openai_chat"]
+        config, error = self._read_config_or_default()
+        if error:
             return {
-                "provider": LLM_PROVIDER_OPENAI_CHAT,
-                "provider_label": "接口",
-                "target_api_type": "openai-chat",
-                "model": openai_chat["model"],
-                "route": "direct.openai-chat",
-                "transport": "openai-chat",
-                "base_url": openai_chat["base_url"],
-                "has_api_key": bool(openai_chat["api_key"]),
+                "provider": "",
+                "provider_label": "LLM 模型接口",
+                "target_api_type": "litellm",
+                "model": "",
+                "route": "direct.litellm",
+                "transport": "litellm",
+                "error": error,
+            }
+        if config["provider"] == LLM_PROVIDER_LITELLM:
+            litellm_config = config["litellm"]
+            return {
+                "provider": LLM_PROVIDER_LITELLM,
+                "provider_label": "LLM 模型接口",
+                "target_api_type": "litellm",
+                "model": litellm_config["model"],
+                "route": "direct.litellm",
+                "transport": "litellm",
+                "preset": litellm_config["preset"],
+                "api_base": litellm_config["api_base"],
+                "has_api_key": bool(litellm_config["api_key"]),
             }
         return {
             "provider": self.vibearound.profile_id,
@@ -260,23 +263,22 @@ class LLMManager:
         }
 
     async def status(self) -> Dict[str, Any]:
-        config = self._read_config()
-        if config["provider"] == LLM_PROVIDER_OPENAI_CHAT:
-            openai_chat = config["openai_chat"]
-            missing = [
-                label
-                for label, value in (
-                    ("baseurl", openai_chat["base_url"]),
-                    ("api key", openai_chat["api_key"]),
-                    ("model", openai_chat["model"]),
-                )
-                if not value
-            ]
+        config, error = self._read_config_or_default()
+        if error:
+            return {
+                "ok": False,
+                **self.describe(),
+                "config": self.public_config(),
+                "error": error,
+            }
+        if config["provider"] == LLM_PROVIDER_LITELLM:
+            litellm_config = config["litellm"]
+            missing = [] if litellm_config["model"] else ["model"]
             return {
                 "ok": not missing,
                 **self.describe(),
                 "config": self.public_config(),
-                "error": f"接口配置缺少：{'、'.join(missing)}。" if missing else "",
+                "error": f"LiteLLM 配置缺少：{'、'.join(missing)}。" if missing else "",
             }
 
         status = await self.vibearound.status()
@@ -288,8 +290,8 @@ class LLMManager:
         }
 
     async def chat(self, messages: List[Dict[str, str]], timeout: float = 90.0) -> str:
-        if self.active_provider() == LLM_PROVIDER_OPENAI_CHAT:
-            return await self._openai_client().chat(messages, timeout)
+        if self.active_provider() == LLM_PROVIDER_LITELLM:
+            return await self._litellm_client().chat(messages, timeout)
         return await self.vibearound.chat(messages, timeout)
 
     async def chat_stream(
@@ -297,8 +299,8 @@ class LLMManager:
         messages: List[Dict[str, str]],
         timeout: float = 90.0,
     ) -> AsyncIterator[str]:
-        if self.active_provider() == LLM_PROVIDER_OPENAI_CHAT:
-            async for chunk in self._openai_client().chat_stream(messages, timeout):
+        if self.active_provider() == LLM_PROVIDER_LITELLM:
+            async for chunk in self._litellm_client().chat_stream(messages, timeout):
                 yield chunk
             return
         async for chunk in self.vibearound.chat_stream(messages, timeout):

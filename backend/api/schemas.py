@@ -76,15 +76,16 @@ class RecordingConfigRequest(BaseModel):
     input_gain: Optional[float] = None
 
 
-class LLMOpenAIChatRequest(BaseModel):
-    base_url: Optional[str] = None
+class LLMLiteLLMRequest(BaseModel):
+    preset: Optional[str] = None
+    api_base: Optional[str] = None
     api_key: Optional[str] = None
     model: Optional[str] = None
 
 
 class LLMConfigRequest(BaseModel):
     provider: str = "vibearound"
-    openai_chat: LLMOpenAIChatRequest = Field(default_factory=LLMOpenAIChatRequest)
+    litellm: LLMLiteLLMRequest = Field(default_factory=LLMLiteLLMRequest)
 
 
 class PromptConfigRequest(BaseModel):

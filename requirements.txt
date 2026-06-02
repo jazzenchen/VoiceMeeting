@@ -11,5 +11,6 @@ torchaudio==2.8.0
 resemblyzer==0.1.4
 typing==3.7.4.3
 opencc-python-reimplemented==0.1.7
-pydantic==2.10.5
+pydantic==2.12.5
 imageio-ffmpeg==0.6.0
+litellm==1.83.9
