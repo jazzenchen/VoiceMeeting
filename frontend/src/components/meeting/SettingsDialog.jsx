@@ -20,6 +20,7 @@ import {
   micDeviceLabel,
   progressPercent,
 } from "@/lib/meeting-display";
+import { LITELLM_PRESETS, litellmPresetById } from "@/lib/llm-config";
 import { useI18n } from "@/lib/i18n";
 
 export function SettingsDialog({
@@ -457,30 +458,50 @@ function LlmSettingsPanel({
   llmConfigError,
 }) {
   const { t } = useI18n();
+  const selectedPreset = litellmPresetById(llmConfigDraft.preset);
+  const applyLiteLLMPreset = (presetId) => {
+    const nextPreset = litellmPresetById(presetId);
+    const nextDraft = {
+      provider: "litellm",
+      preset: nextPreset.id,
+    };
+    if (!llmConfigDraft.model && nextPreset.modelPrefix) {
+      nextDraft.model = nextPreset.modelPrefix;
+    }
+    if (!llmConfigDraft.apiBase && nextPreset.defaultApiBase) {
+      nextDraft.apiBase = nextPreset.defaultApiBase;
+    }
+    updateLlmConfigDraft(nextDraft);
+  };
+  const currentModel = llmConfig.provider === "litellm" && llmConfig.litellm.model
+    ? ` · ${llmConfig.litellm.model}`
+    : "";
   return (
     <form className="settings-panel" onSubmit={saveLlmConfig}>
       <div className="settings-section-head">
         <div>
           <h3>{t("纪要大模型")}</h3>
           <p>{t("当前：{value}", {
-            value: `${t(llmProviderLabel(llmConfig.provider))}${llmConfig.provider === "openai-chat" && llmConfig.openai_chat.model ? ` · ${llmConfig.openai_chat.model}` : ""}`,
+            value: `${t(llmProviderLabel(llmConfig.provider))}${currentModel}`,
           })}</p>
         </div>
       </div>
 
+      {llmConfig.config_error && <div className="error-line llm-error">{llmConfig.config_error}</div>}
+
       <div className="llm-provider-tabs" role="radiogroup" aria-label={t("会议助手来源")}>
-        <label className={`llm-provider-option ${llmConfigDraft.provider === "openai-chat" ? "active" : ""}`}>
+        <label className={`llm-provider-option ${llmConfigDraft.provider === "litellm" ? "active" : ""}`}>
           <input
             type="radio"
             name="llm-provider"
-            value="openai-chat"
-            checked={llmConfigDraft.provider === "openai-chat"}
-            onChange={() => updateLlmConfigDraft("provider", "openai-chat")}
+            value="litellm"
+            checked={llmConfigDraft.provider === "litellm"}
+            onChange={() => updateLlmConfigDraft("provider", "litellm")}
             disabled={llmConfigSaving}
           />
           <span>
             <strong>{t("LLM 模型接口")}</strong>
-            <small>OpenAI Chat Completions</small>
+            <small>LiteLLM API</small>
           </span>
         </label>
         <label className={`llm-provider-option ${llmConfigDraft.provider === "vibearound" ? "active" : ""}`}>
@@ -499,18 +520,32 @@ function LlmSettingsPanel({
         </label>
       </div>
 
-      {llmConfigDraft.provider === "openai-chat" && (
+      {llmConfigDraft.provider === "litellm" && (
         <div className="llm-fields">
           <p className="llm-provider-note">
-            {t("仅支持 OpenAI Chat Completions 兼容接口，请填写可访问 /v1/chat/completions 的 BaseURL。")}
+            {t("通过 LiteLLM 接入各家模型。选择预设后填写模型名、API Key 和可选 API Base。")}
           </p>
           <label>
-            <span>BaseURL</span>
+            <span>{t("服务商预设")}</span>
+            <select
+              className="inline-input llm-input"
+              value={llmConfigDraft.preset}
+              onChange={(event) => applyLiteLLMPreset(event.target.value)}
+              disabled={llmConfigSaving}
+            >
+              {LITELLM_PRESETS.map((preset) => (
+                <option key={preset.id} value={preset.id}>{preset.label}</option>
+              ))}
+            </select>
+          </label>
+          <p className="llm-provider-note">{t(selectedPreset.helper)}</p>
+          <label>
+            <span>Model</span>
             <input
               className="inline-input llm-input"
-              value={llmConfigDraft.baseUrl}
-              onChange={(event) => updateLlmConfigDraft("baseUrl", event.target.value)}
-              placeholder="https://api.openai.com/v1"
+              value={llmConfigDraft.model}
+              onChange={(event) => updateLlmConfigDraft("model", event.target.value)}
+              placeholder={selectedPreset.modelPlaceholder}
               disabled={llmConfigSaving}
             />
           </label>
@@ -521,18 +556,18 @@ function LlmSettingsPanel({
               type="password"
               value={llmConfigDraft.apiKey}
               onChange={(event) => updateLlmConfigDraft("apiKey", event.target.value)}
-              placeholder={llmConfig.openai_chat.has_api_key ? "已保存，留空保持不变" : "sk-..."}
+              placeholder={llmConfig.litellm.has_api_key ? "已保存，留空保持不变" : "sk-..."}
               autoComplete="off"
               disabled={llmConfigSaving}
             />
           </label>
           <label>
-            <span>Model</span>
+            <span>API Base URL</span>
             <input
               className="inline-input llm-input"
-              value={llmConfigDraft.model}
-              onChange={(event) => updateLlmConfigDraft("model", event.target.value)}
-              placeholder="gpt-4o-mini"
+              value={llmConfigDraft.apiBase}
+              onChange={(event) => updateLlmConfigDraft("apiBase", event.target.value)}
+              placeholder={t(selectedPreset.apiBasePlaceholder)}
               disabled={llmConfigSaving}
             />
           </label>

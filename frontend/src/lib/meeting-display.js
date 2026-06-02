@@ -216,7 +216,7 @@ export function serviceStatusText(value) {
 export function assistantRouteText(llm) {
   if (!llm?.transport && !llm?.route && !llm?.provider) return "待连接";
   const route = String(llm?.route || llm?.transport || llm?.provider || "");
-  if (llm?.provider === "openai-chat" || route.includes("openai-chat")) {
+  if (llm?.provider === "litellm" || route.includes("litellm")) {
     return llm?.model ? `LLM 模型接口 · ${llm.model}` : "LLM 模型接口";
   }
   if (route.includes("web-chat")) return "Codex 通道";
@@ -230,7 +230,7 @@ export function assistantStatusText(llm) {
 }
 
 export function llmProviderLabel(value) {
-  if (value === "openai-chat") return "LLM 模型接口";
+  if (value === "litellm") return "LLM 模型接口";
   return "VibeAround";
 }
 

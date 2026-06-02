@@ -434,11 +434,11 @@ function App() {
     if (data.config) {
       setLlmConfig(normalizeLlmConfig(data.config));
     }
-    const provider = data.provider === "openai-chat" ? "LLM 模型接口" : "VibeAround";
+    const provider = data.provider === "litellm" ? "LLM 模型接口" : "VibeAround";
     setLlmStatus({
       provider: data.provider_label || data.profile_id || provider,
       transport: data.route || data.transport || data.target_api_type || data.provider || "local-api",
-      model: data.model || data.config?.openai_chat?.model,
+      model: data.model || data.config?.litellm?.model,
     });
   }, []);
 
@@ -781,10 +781,11 @@ function App() {
 
   const updateLlmConfigDraft = useCallback((field, value) => {
     setLlmConfigError("");
-    setLlmConfigDraft((current) => ({
-      ...current,
-      [field]: value,
-    }));
+    setLlmConfigDraft((current) => (
+      typeof field === "object" && field !== null
+        ? { ...current, ...field }
+        : { ...current, [field]: value }
+    ));
   }, []);
 
   const saveLlmConfig = useCallback(
@@ -800,8 +801,9 @@ function App() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             provider: llmConfigDraft.provider,
-            openai_chat: {
-              base_url: llmConfigDraft.baseUrl,
+            litellm: {
+              preset: llmConfigDraft.preset,
+              api_base: llmConfigDraft.apiBase,
               api_key: llmConfigDraft.apiKey,
               model: llmConfigDraft.model,
             },
@@ -812,8 +814,8 @@ function App() {
         setLlmConfigDraft(llmDraftFromConfig(normalized));
         setLlmStatus({
           provider: llmProviderLabel(normalized.provider),
-          transport: normalized.provider === "openai-chat" ? "openai-chat" : "local-api",
-          model: normalized.openai_chat.model,
+          transport: normalized.provider === "litellm" ? "litellm" : "local-api",
+          model: normalized.litellm.model,
         });
         setStatus((current) => ({
           ...current,
