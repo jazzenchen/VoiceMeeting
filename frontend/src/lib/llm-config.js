@@ -13,7 +13,7 @@ export const LITELLM_PRESETS = [
   {
     id: "openai",
     label: "OpenAI",
-    helper: "使用 LiteLLM 模型名前缀，例如 openai/gpt-4o-mini。",
+    helper: "使用模型名前缀，例如 openai/gpt-4o-mini。",
     modelPrefix: "openai/",
     modelPlaceholder: "openai/gpt-4o-mini",
     apiBasePlaceholder: "留空使用官方地址",
@@ -70,7 +70,7 @@ export const LITELLM_PRESETS = [
   {
     id: "custom",
     label: "Custom",
-    helper: "按 LiteLLM 文档填写完整模型名；API Key 和 API Base 按服务要求填写。",
+    helper: "按服务商文档填写完整模型名；API Key 和 API Base 按服务要求填写。",
     modelPrefix: "",
     modelPlaceholder: "provider/model-name",
     apiBasePlaceholder: "可选",

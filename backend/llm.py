@@ -38,12 +38,12 @@ def _clean_provider(value: Any) -> str:
     provider = str(value or "").strip().lower()
     if provider in {LLM_PROVIDER_VIBEAROUND, LLM_PROVIDER_LITELLM}:
         return provider
-    raise LLMConfigError("LLM 配置解析失败：provider 必须是 vibearound 或 litellm。")
+    raise LLMConfigError("LLM 配置解析失败：provider 字段不是当前版本支持的值，请在设置里重新保存。")
 
 
 def _clean_litellm(value: Any) -> Dict[str, str]:
     if not isinstance(value, dict):
-        raise LLMConfigError("LLM 配置解析失败：litellm 必须是对象。")
+        raise LLMConfigError("LLM 配置解析失败：模型接口配置必须是对象。")
     return {
         "preset": str(value.get("preset") or "custom").strip(),
         "api_base": str(value.get("api_base") or value.get("apiBase") or "").strip(),
@@ -57,10 +57,10 @@ def _merge_config(raw: Any) -> Dict[str, Any]:
         raise LLMConfigError("LLM 配置解析失败：根节点必须是对象。")
     provider = _clean_provider(raw.get("provider"))
     if "litellm" not in raw:
-        raise LLMConfigError("LLM 配置解析失败：缺少 litellm 配置。")
+        raise LLMConfigError("LLM 配置解析失败：缺少模型接口配置。")
     litellm_config = _clean_litellm(raw.get("litellm"))
     if provider == LLM_PROVIDER_LITELLM and not litellm_config["model"]:
-        raise LLMConfigError("LLM 配置解析失败：LiteLLM 模型不能为空。")
+        raise LLMConfigError("LLM 配置解析失败：模型接口的模型名不能为空。")
     return {
         "provider": provider,
         "litellm": litellm_config,
@@ -122,16 +122,16 @@ class LiteLLMClient:
 
     async def chat(self, messages: List[Dict[str, str]], timeout: float = 90.0) -> str:
         if acompletion is None:
-            raise RuntimeError("LiteLLM 未安装，请重新安装应用依赖。")
+            raise RuntimeError("模型接口依赖未安装，请重新安装应用依赖。")
         response = await acompletion(**self._completion_kwargs(messages, timeout, stream=False))
         choice = self._first_choice(response)
         if choice is None:
-            raise RuntimeError("LiteLLM 接口没有返回 choices。")
+            raise RuntimeError("模型接口没有返回 choices。")
         message = self._value(choice, "message") or {}
         content = self._content_to_text(self._value(message, "content"))
         if content:
             return content
-        raise RuntimeError("LiteLLM 接口没有返回可用内容。")
+        raise RuntimeError("模型接口没有返回可用内容。")
 
     async def chat_stream(
         self,
@@ -139,7 +139,7 @@ class LiteLLMClient:
         timeout: float = 90.0,
     ) -> AsyncIterator[str]:
         if acompletion is None:
-            raise RuntimeError("LiteLLM 未安装，请重新安装应用依赖。")
+            raise RuntimeError("模型接口依赖未安装，请重新安装应用依赖。")
         response = await acompletion(**self._completion_kwargs(messages, timeout, stream=True))
         async for event in response:
             choice = self._first_choice(event)
@@ -208,7 +208,7 @@ class LLMManager:
         }
 
         if provider == LLM_PROVIDER_LITELLM and not litellm_config["model"]:
-            raise ValueError("LiteLLM 模型不能为空。")
+            raise ValueError("模型接口的模型名不能为空。")
 
         config = {
             "provider": provider,
@@ -220,7 +220,7 @@ class LLMManager:
     def _litellm_client(self) -> LiteLLMClient:
         config = self._read_config()["litellm"]
         if not config["model"]:
-            raise RuntimeError("LiteLLM 模型不能为空。")
+            raise RuntimeError("模型接口的模型名不能为空。")
         return LiteLLMClient(config["model"], config["api_key"], config["api_base"])
 
     def active_provider(self) -> str:
@@ -278,7 +278,7 @@ class LLMManager:
                 "ok": not missing,
                 **self.describe(),
                 "config": self.public_config(),
-                "error": f"LiteLLM 配置缺少：{'、'.join(missing)}。" if missing else "",
+                "error": f"模型接口配置缺少：{'、'.join(missing)}。" if missing else "",
             }
 
         status = await self.vibearound.status()

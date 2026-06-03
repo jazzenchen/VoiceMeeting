@@ -9,7 +9,7 @@ VoiceMeeting turns long conversations into searchable transcripts and polished m
 - **Private by design**: speech-to-text runs locally with Whisper-family models, including Apple Silicon MLX models on Mac.
 - **Built for real meetings**: timeline playback, speaker-aware transcript review, editable copies, re-transcription, proofreading, and paragraph cleanup are part of the same workflow.
 - **No mystery pipeline**: downloaded models, transcript versions, notes, and audio chunks are visible and managed locally.
-- **Bring your own assistant**: meeting notes can use VibeAround or a LiteLLM-backed API connection.
+- **Bring your own assistant**: meeting notes can use VibeAround or a configurable LLM API connection.
 - **Bilingual interface**: switch between Chinese and English from the top bar.
 
 ## Current Features
@@ -60,7 +60,7 @@ Signing credentials live in `apple-sign.config`, which is intentionally ignored 
 VoiceMeeting supports two note-generation routes:
 
 - **VibeAround**: local channel for the meeting assistant.
-- **LLM API**: LiteLLM-backed model access. In Settings, choose a provider preset, enter the LiteLLM model name, API key, and optional API Base URL.
+- **LLM API**: configurable model access. In Settings, choose a provider preset, enter the model name, API key, and optional API Base URL.
 
 ## 中文说明
 
@@ -73,7 +73,7 @@ VoiceMeeting 是一个面向会议录音和音频转写的本地桌面应用：�
 - **隐私优先**：语音识别在本机完成，Mac 上可使用 Apple Silicon 友好的 MLX Whisper 模型。
 - **适合真实会议**：音频时间线、逐字稿回放跳转、说话人校准、自动校对、段落整理、可编辑副本都在同一套流程里。
 - **流程透明**：模型文件、转写版本、音频片段和纪要都保存在本地，可在设置里管理。
-- **可接入自己的助手**：纪要生成支持 VibeAround，也支持通过 LiteLLM 接入各家大模型 API。
+- **可接入自己的助手**：纪要生成支持 VibeAround，也支持通过模型接口接入各家大模型 API。
 - **中英文界面**：顶栏可一键切换中文和英文。
 
 ### 本地开发
@@ -100,4 +100,4 @@ tauri/src-tauri/target/release/bundle/dmg/
 
 ### 会议助手接口
 
-如果不用 VibeAround，可以在设置里配置“LLM 模型接口”。当前接口层使用 LiteLLM：在界面里选择服务商预设，填写模型名、API Key 和可选 API Base URL 即可。常见模型名示例包括 `openai/gpt-4o-mini`、`anthropic/claude-sonnet-4-5`、`openrouter/openai/gpt-4o-mini`、`deepseek/deepseek-chat`；OpenAI 兼容服务一般使用 `openai/your-model` 并填写对应的 API Base。
+如果不用 VibeAround，可以在设置里配置“LLM 模型接口”：在界面里选择服务商预设，填写模型名、API Key 和可选 API Base URL 即可。常见模型名示例包括 `openai/gpt-4o-mini`、`anthropic/claude-sonnet-4-5`、`openrouter/openai/gpt-4o-mini`、`deepseek/deepseek-chat`；OpenAI 兼容服务一般使用 `openai/your-model` 并填写对应的 API Base。

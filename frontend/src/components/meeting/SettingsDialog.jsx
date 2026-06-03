@@ -501,7 +501,7 @@ function LlmSettingsPanel({
           />
           <span>
             <strong>{t("LLM 模型接口")}</strong>
-            <small>LiteLLM API</small>
+            <small>{t("通用模型 API")}</small>
           </span>
         </label>
         <label className={`llm-provider-option ${llmConfigDraft.provider === "vibearound" ? "active" : ""}`}>
@@ -523,7 +523,7 @@ function LlmSettingsPanel({
       {llmConfigDraft.provider === "litellm" && (
         <div className="llm-fields">
           <p className="llm-provider-note">
-            {t("通过 LiteLLM 接入各家模型。选择预设后填写模型名、API Key 和可选 API Base。")}
+            {t("选择服务商预设后填写模型名、API Key 和可选 API Base。")}
           </p>
           <label>
             <span>{t("服务商预设")}</span>
