@@ -1,9 +1,25 @@
+import tempfile
 import unittest
+import wave
 
-from backend.diarization import split_segments_by_turns
+from backend.diarization import _load_wav_for_pyannote, split_segments_by_turns
 
 
 class DiarizationSplitTests(unittest.TestCase):
+    def test_loads_wav_as_pyannote_waveform(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".wav") as handle:
+            with wave.open(handle.name, "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(16000)
+                wav.writeframes((0).to_bytes(2, "little", signed=True) * 160)
+
+            result = _load_wav_for_pyannote(handle.name)
+
+        self.assertEqual(result["sample_rate"], 16000)
+        self.assertEqual(tuple(result["waveform"].shape), (1, 160))
+        self.assertEqual(str(result["uri"]), handle.name)
+
     def test_splits_segment_by_turns_near_punctuation(self) -> None:
         segments = [
             {

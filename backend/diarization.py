@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+import warnings
+import wave
 from importlib import metadata
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -143,12 +145,18 @@ class PyannoteDiarizer:
         self.loading = True
         self.last_error = ""
         try:
-            from pyannote.audio import Pipeline
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="(?s).*torchcodec is not installed correctly.*",
+                    category=UserWarning,
+                    module="pyannote\\.audio\\.core\\.io",
+                )
+                from pyannote.audio import Pipeline
 
             pipeline = Pipeline.from_pretrained(
                 self.model,
                 token=self.token,
-                local_files_only=not self.allow_remote_model,
             )
             try:
                 import torch
@@ -167,7 +175,7 @@ class PyannoteDiarizer:
 
     def diarize(self, wav_path: Path) -> List[Dict[str, Any]]:
         pipeline = self._load_pipeline()
-        output = pipeline(str(wav_path))
+        output = pipeline(_load_wav_for_pyannote(wav_path))
         annotation = getattr(output, "exclusive_speaker_diarization", None)
         if annotation is None:
             annotation = getattr(output, "speaker_diarization", output)
@@ -197,6 +205,39 @@ class PyannoteDiarizer:
                 except Exception:
                     continue
         return turns
+
+
+def _load_wav_for_pyannote(wav_path: Path) -> Dict[str, Any]:
+    import numpy as np
+    import torch
+
+    with wave.open(str(wav_path), "rb") as wav:
+        channels = wav.getnchannels()
+        sample_width = wav.getsampwidth()
+        sample_rate = wav.getframerate()
+        frames = wav.getnframes()
+        payload = wav.readframes(frames)
+
+    if sample_width == 1:
+        audio = (np.frombuffer(payload, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+    elif sample_width == 2:
+        audio = np.frombuffer(payload, dtype="<i2").astype(np.float32) / 32768.0
+    elif sample_width == 4:
+        audio = np.frombuffer(payload, dtype="<i4").astype(np.float32) / 2147483648.0
+    else:
+        raise DiarizationUnavailable(f"Unsupported WAV sample width: {sample_width} bytes")
+
+    if channels <= 0:
+        raise DiarizationUnavailable("Invalid WAV channel count.")
+    if audio.size % channels != 0:
+        raise DiarizationUnavailable("Invalid WAV frame data.")
+
+    waveform = audio.reshape(-1, channels).T.copy()
+    return {
+        "waveform": torch.from_numpy(waveform),
+        "sample_rate": sample_rate,
+        "uri": str(wav_path),
+    }
 
 
 def _overlap_ms(left_start: int, left_end: int, right_start: int, right_end: int) -> int:
