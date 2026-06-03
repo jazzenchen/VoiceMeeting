@@ -305,19 +305,30 @@ function RecordingSettingsPanel({
   activeModelDownload,
 }) {
   const { t } = useI18n();
+  const missingModelDownloads = missingRecordingModels.filter((item) => item.type !== "unavailable");
+  const unavailableRecordingModels = missingRecordingModels.filter((item) => item.type === "unavailable");
+  const diarizationMeta = modelCatalogByKey.get("diarization:pyannote-community-1");
   return (
     <form className="settings-panel" onSubmit={saveRecordingConfig}>
       <div className="settings-section-head">
         <div>
           <h3>{t("全局录制设置")}</h3>
-          <p>{missingRecordingModels.length ? t("当前设置缺少本地模型。") : t("当前录制配置已就绪。")}</p>
+          <p>
+            {unavailableRecordingModels.length
+              ? t("当前设置有不可用的本地能力。")
+              : missingModelDownloads.length
+                ? t("当前设置缺少本地模型。")
+                : t("当前录制配置已就绪。")}
+          </p>
         </div>
         <span className={`save-state ${missingRecordingModels.length || recordingConfigDirty ? "dirty" : ""}`}>
           {recordingConfigSaving
             ? t("保存中")
             : recordingConfigDirty
               ? t("未保存")
-              : missingRecordingModels.length
+              : unavailableRecordingModels.length
+                ? t("需处理")
+                : missingModelDownloads.length
                 ? t("需下载")
                 : t("已保存")}
         </span>
@@ -384,9 +395,16 @@ function RecordingSettingsPanel({
             onChange={(event) => updateRecordingConfig("speakerMode", event.target.value)}
             disabled={recording}
           >
-            {SPEAKER_MODE_OPTIONS.map(([value, label]) => (
-              <option key={value} value={value}>{t(label)}</option>
-            ))}
+            {SPEAKER_MODE_OPTIONS.map(([value, label]) => {
+              const unavailable = value === "diarization"
+                && diarizationMeta?.installed
+                && diarizationMeta?.available === false;
+              return (
+                <option disabled={unavailable} key={value} value={value}>
+                  {t(label)}{unavailable ? ` · ${t("不可用")}` : ""}
+                </option>
+              );
+            })}
           </select>
         </label>
         <label>
@@ -419,7 +437,13 @@ function RecordingSettingsPanel({
 
       {recordingConfigError && <div className="error-line llm-error">{recordingConfigError}</div>}
 
-      {missingRecordingModels.length > 0 && (
+      {unavailableRecordingModels.length > 0 && (
+        <div className="error-line llm-error">
+          {unavailableRecordingModels.map((item) => item.reason || `${item.label || item.model} ${t("不可用")}`).join("；")}
+        </div>
+      )}
+
+      {missingModelDownloads.length > 0 && (
         <div className="config-actions">
           <button
             type="button"
@@ -439,7 +463,7 @@ function RecordingSettingsPanel({
           type="submit"
           className="confirm-save"
           disabled={recording || recordingConfigSaving || missingRecordingModels.length > 0}
-          title={missingRecordingModels.length ? t("请先下载模型") : t("保存")}
+          title={unavailableRecordingModels.length ? t("请先处理不可用项") : missingModelDownloads.length ? t("请先下载模型") : t("保存")}
         >
           <Check size={14} />
           <span>{recordingConfigSaving ? t("保存中") : t("保存")}</span>
@@ -751,6 +775,7 @@ function ModelRow({ item, kind, metaLines, downloadModel, deleteModel }) {
   const { t } = useI18n();
   const active = ["queued", "running", "cancelling"].includes(item.job?.status);
   const loading = Boolean(item.loading);
+  const unavailable = item.installed && item.available === false;
 
   return (
     <div className="model-row">
@@ -760,6 +785,7 @@ function ModelRow({ item, kind, metaLines, downloadModel, deleteModel }) {
           <small key={line}>{line}</small>
         ))}
         {loading && <small>{t("正在加载识别模型")}</small>}
+        {unavailable && <em>{item.unavailable_reason || t("运行环境未就绪")}</em>}
         {active && (
           <>
             <div className="model-progress">
@@ -773,6 +799,8 @@ function ModelRow({ item, kind, metaLines, downloadModel, deleteModel }) {
       <div className="model-actions">
         {loading ? (
           <span className="model-badge working">{t("加载中")}</span>
+        ) : unavailable ? (
+          <span className="model-badge blocked">{t("不可用")}</span>
         ) : item.installed ? (
           <span className="model-badge ready"><Check size={12} />{t("本地")}</span>
         ) : active ? (

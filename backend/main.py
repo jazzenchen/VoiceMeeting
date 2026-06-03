@@ -36,7 +36,7 @@ from .config import (
     PROJECT_DIR,
     ensure_runtime_dirs,
 )
-from .diarization import DiarizationUnavailable, PyannoteDiarizer, assign_speakers
+from .diarization import DiarizationUnavailable, PyannoteDiarizer, assign_speakers, pyannote_audio_status
 from .llm import LLMManager
 from .model_registry import (
     ASR_MODEL_CATALOG,
@@ -208,6 +208,23 @@ def model_catalog() -> Dict[str, Any]:
 
     pyannote_path = local_pyannote_model_path()
     pyannote_installed = pyannote_path is not None
+    pyannote_dependency = pyannote_audio_status()
+    pyannote_available = pyannote_installed and bool(pyannote_dependency.get("available"))
+    pyannote_unavailable_reason = ""
+    if pyannote_installed and not pyannote_available:
+        pyannote_unavailable_reason = str(pyannote_dependency.get("reason") or "高精度分离运行环境未就绪。")
+    pyannote_local_runtime = {
+        "backend": "pyannote",
+        "model": str(PYANNOTE_MODEL_DIR),
+        "device": diarizer.device,
+        "enabled": pyannote_available,
+        "loaded": bool(local_pyannote_diarizer and local_pyannote_diarizer.loaded),
+        "loading": bool(local_pyannote_diarizer and local_pyannote_diarizer.loading),
+        "available": pyannote_available,
+        "reason": pyannote_unavailable_reason,
+        "last_error": str(local_pyannote_diarizer.last_error) if local_pyannote_diarizer else "",
+        "dependency": pyannote_dependency,
+    }
     return {
         "asr": {
             "model_dir": str(ASR_MODEL_DIR),
@@ -234,14 +251,15 @@ def model_catalog() -> Dict[str, Any]:
                     "size_bytes": directory_size_bytes(PYANNOTE_MODEL_DIR) if pyannote_installed else 0,
                     "requires_token": True,
                     "token_available": model_downloads.hf_token_available(),
-                    "enabled": diarizer.enabled,
-                    "available": diarizer.status().get("available") or (
-                        pyannote_installed and not diarizer.enabled
-                    ),
+                    "enabled": pyannote_available,
+                    "available": pyannote_available,
+                    "unavailable_reason": pyannote_unavailable_reason,
+                    "dependency": pyannote_dependency,
                     "job": model_downloads.latest_job("diarization", PYANNOTE_COMMUNITY_MODEL_ID),
                 }
             ],
             "runtime": diarizer.status(),
+            "local_runtime": pyannote_local_runtime,
         },
         "downloads": model_downloads.recent_states(),
     }

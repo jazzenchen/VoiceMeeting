@@ -1,12 +1,73 @@
 from __future__ import annotations
 
+import importlib.util
 import os
+import sys
+from importlib import metadata
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
 class DiarizationUnavailable(RuntimeError):
     pass
+
+
+PYANNOTE_REQUIRED_PYTHON = (3, 10)
+PYANNOTE_REQUIRED_PACKAGE = ">=4.0.0"
+PYANNOTE_PACKAGE_NAME = "pyannote.audio"
+
+
+def _python_version_text() -> str:
+    return ".".join(str(part) for part in sys.version_info[:3])
+
+
+def _module_available(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ModuleNotFoundError, ValueError):
+        return False
+
+
+def _major_version(value: str) -> Optional[int]:
+    head = value.split(".", 1)[0]
+    return int(head) if head.isdigit() else None
+
+
+def pyannote_audio_status() -> Dict[str, Any]:
+    status: Dict[str, Any] = {
+        "package": PYANNOTE_PACKAGE_NAME,
+        "required_package": PYANNOTE_REQUIRED_PACKAGE,
+        "package_version": "",
+        "required_python": ">=3.10",
+        "python": _python_version_text(),
+        "available": False,
+        "reason": "",
+    }
+    if sys.version_info < PYANNOTE_REQUIRED_PYTHON:
+        status["reason"] = (
+            f"高精度分离需要 Python 3.10+ 运行环境。当前是 Python {_python_version_text()}，"
+            "请重新运行安装脚本。"
+        )
+        return status
+    if not _module_available("pyannote") or not _module_available(PYANNOTE_PACKAGE_NAME):
+        status["reason"] = "高精度分离运行库未安装，请重新运行安装脚本。"
+        return status
+    try:
+        package_version = metadata.version(PYANNOTE_PACKAGE_NAME)
+    except metadata.PackageNotFoundError:
+        status["reason"] = "高精度分离运行库未安装，请重新运行安装脚本。"
+        return status
+
+    status["package_version"] = package_version
+    major = _major_version(package_version)
+    if major is None or major < 4:
+        status["reason"] = (
+            f"高精度分离运行库版本过低（当前 {package_version}，需要 4.0+），"
+            "请重新运行安装脚本。"
+        )
+        return status
+    status["available"] = True
+    return status
 
 
 class PyannoteDiarizer:
@@ -43,10 +104,13 @@ class PyannoteDiarizer:
 
     def status(self) -> Dict[str, Any]:
         reason = ""
+        dependency = pyannote_audio_status()
         if not self.enabled:
             reason = "set VOICE_MEETING_DIARIZATION=pyannote to enable"
         elif not Path(self.model).exists():
-            reason = "local diarization model path required"
+            reason = "本地高精度分离模型未安装，请先在设置里下载模型。"
+        elif not dependency["available"]:
+            reason = str(dependency["reason"])
         return {
             "backend": "pyannote" if self.enabled else "off",
             "model": self.model,
@@ -57,17 +121,21 @@ class PyannoteDiarizer:
             "available": self.enabled and not reason,
             "reason": reason,
             "last_error": self.last_error,
+            "dependency": dependency,
         }
 
     def _load_pipeline(self) -> Any:
         if not self.enabled:
-            raise DiarizationUnavailable("Speaker diarization is not enabled.")
+            raise DiarizationUnavailable("高精度分离未启用。")
         if self._pipeline is not None:
             return self._pipeline
         if not Path(self.model).exists() and not self.allow_remote_model:
             raise DiarizationUnavailable(
-                "Diarization model must be a local path. Set VOICE_MEETING_ALLOW_MODEL_DOWNLOAD=1 only for setup."
+                "本地高精度分离模型未安装，请先在设置里下载模型。"
             )
+        dependency = pyannote_audio_status()
+        if not dependency["available"]:
+            raise DiarizationUnavailable(str(dependency["reason"]))
 
         self.loading = True
         self.last_error = ""

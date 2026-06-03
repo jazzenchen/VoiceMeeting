@@ -885,19 +885,40 @@ function App() {
 
   const missingModelsForConfig = useCallback((config) => (
     (modelCatalog || recordingAsrMetaByName.size > 0)
-      ? requiredModelsForConfig(config).filter((item) => {
+      ? requiredModelsForConfig(config).map((item) => {
         const meta = modelCatalogByKey.get(`${item.kind}:${item.model}`);
-        return !meta?.installed;
-      })
+        const label = meta?.label || item.model;
+        if (!meta?.installed) {
+          return { ...item, type: "missing", label };
+        }
+        if (item.kind === "diarization" && meta.available === false) {
+          return {
+            ...item,
+            type: "unavailable",
+            label,
+            reason: meta.unavailable_reason || "高精度分离运行环境未就绪。",
+          };
+        }
+        return null;
+      }).filter(Boolean)
       : []
   ), [modelCatalog, modelCatalogByKey, recordingAsrMetaByName.size, requiredModelsForConfig]);
 
   const ensureRecordingModels = useCallback(async (config = recordingConfigRef.current) => {
-    const missing = missingModelsForConfig(config);
-    if (missing.length === 0) return true;
+    const issues = missingModelsForConfig(config);
+    if (issues.length === 0) return true;
+    const unavailable = issues.filter((item) => item.type === "unavailable");
+    if (unavailable.length > 0) {
+      const message = unavailable.map((item) => item.reason || `${item.label || item.model} 不可用`).join("；");
+      setError(message);
+      setSettingsTab("models");
+      setSettingsOpen(true);
+      return false;
+    }
+    const missing = issues.filter((item) => item.type === "missing");
     const names = missing.map((item) => {
       const meta = modelCatalogByKey.get(`${item.kind}:${item.model}`);
-      return meta?.label || item.model;
+      return item.label || meta?.label || item.model;
     }).join("、");
     const ok = window.confirm(`当前设置缺少模型：${names}。是否现在下载？`);
     if (!ok) {

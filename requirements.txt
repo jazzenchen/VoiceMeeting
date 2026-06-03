@@ -14,3 +14,4 @@ opencc-python-reimplemented==0.1.7
 pydantic==2.12.5
 imageio-ffmpeg==0.6.0
 litellm==1.83.9
+-r requirements-diarization.txt

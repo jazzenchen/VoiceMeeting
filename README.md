@@ -33,6 +33,8 @@ The app is signed and notarized for macOS distribution.
 
 ## Development
 
+Requires Python 3.10 or newer. High-precision speaker separation uses `pyannote.audio` 4.x, which does not run on Python 3.9. If an existing `.venv` was created with Python 3.9, move or remove it before rerunning setup.
+
 ```bash
 ./scripts/setup.sh
 ./scripts/dev.sh
@@ -77,6 +79,8 @@ VoiceMeeting 是一个面向会议录音和音频转写的本地桌面应用：�
 - **中英文界面**：顶栏可一键切换中文和英文。
 
 ### 本地开发
+
+需要 Python 3.10 或更新版本。高精度说话人分离依赖 `pyannote.audio` 4.x，不能在 Python 3.9 环境运行。如果已有 `.venv` 是 Python 3.9 创建的，请先移动或删除后再重新运行安装脚本。
 
 ```bash
 ./scripts/setup.sh

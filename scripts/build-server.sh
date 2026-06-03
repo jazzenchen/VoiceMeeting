@@ -11,6 +11,16 @@ if [ ! -x "$PYTHON" ]; then
   PYTHON="$(command -v python3)"
 fi
 
+if ! "$PYTHON" - <<'PY' >/dev/null 2>&1
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 10) else 1)
+PY
+then
+  "$PYTHON" --version >&2 || true
+  echo "Python 3.10+ is required to build the VoiceMeeting server with high-precision speaker separation." >&2
+  exit 1
+fi
+
 if ! "$PYTHON" -c "import PyInstaller" >/dev/null 2>&1; then
   "$PYTHON" -m pip install pyinstaller
 fi

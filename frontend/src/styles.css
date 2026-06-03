@@ -532,6 +532,12 @@ a {
   border-color: #f1d7a0;
 }
 
+.model-badge.blocked {
+  color: #8a2431;
+  background: #fdecef;
+  border-color: #f4b8c1;
+}
+
 .model-progress {
   height: 4px;
   overflow: hidden;
@@ -3361,6 +3367,12 @@ a {
 }
 
 .app-shell .model-badge.working {
+  color: var(--risk);
+  background: var(--risk-soft);
+  border-color: var(--risk-ring);
+}
+
+.app-shell .model-badge.blocked {
   color: var(--risk);
   background: var(--risk-soft);
   border-color: var(--risk-ring);
