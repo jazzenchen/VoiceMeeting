@@ -36,7 +36,13 @@ from .config import (
     PROJECT_DIR,
     ensure_runtime_dirs,
 )
-from .diarization import DiarizationUnavailable, PyannoteDiarizer, assign_speakers, pyannote_audio_status
+from .diarization import (
+    DiarizationUnavailable,
+    PyannoteDiarizer,
+    assign_speakers,
+    pyannote_audio_status,
+    split_segments_by_turns,
+)
 from .llm import LLMManager
 from .model_registry import (
     ASR_MODEL_CATALOG,
@@ -1532,7 +1538,10 @@ async def reprocess_asr_version(
             if active_diarizer is not None:
                 try:
                     turns = await asyncio.to_thread(active_diarizer.diarize, wav_path)
-                    if speaker_mode == "diarization" or not speaker_tracker.enabled:
+                    if speaker_mode == "diarization":
+                        result["segments"] = split_segments_by_turns(result["segments"], turns)
+                        assigned_total += len(result["segments"])
+                    elif not speaker_tracker.enabled:
                         result["segments"] = assign_speakers(result["segments"], turns)
                         assigned_total += len(result["segments"])
                 except DiarizationUnavailable:
@@ -1673,7 +1682,10 @@ async def reprocess_speaker_version(
                 active_diarizer = diarizer_for_mode(speaker_mode)
                 if active_diarizer is not None:
                     turns = await asyncio.to_thread(active_diarizer.diarize, wav_path)
-                    if speaker_mode == "diarization" or not speaker_tracker.enabled:
+                    if speaker_mode == "diarization":
+                        assigned_segments = split_segments_by_turns(segments, turns)
+                        assigned_total += len(assigned_segments)
+                    elif not speaker_tracker.enabled:
                         assigned_segments = assign_speakers(segments, turns)
                         assigned_total += len(assigned_segments)
 

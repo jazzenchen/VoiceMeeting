@@ -13,8 +13,11 @@ class DiarizationUnavailable(RuntimeError):
 
 
 PYANNOTE_REQUIRED_PYTHON = (3, 10)
-PYANNOTE_REQUIRED_PACKAGE = ">=4.0.0"
+PYANNOTE_REQUIRED_PACKAGE = ">=4.0.0,<5.0.0"
 PYANNOTE_PACKAGE_NAME = "pyannote.audio"
+MIN_DIARIZATION_SPLIT_OVERLAP_MS = 350
+MIN_DIARIZATION_SPLIT_CHARS = 4
+SPLIT_BOUNDARY_CHARS = set(" \t\n,.;:!?，。！？；：、")
 
 
 def _python_version_text() -> str:
@@ -165,7 +168,9 @@ class PyannoteDiarizer:
     def diarize(self, wav_path: Path) -> List[Dict[str, Any]]:
         pipeline = self._load_pipeline()
         output = pipeline(str(wav_path))
-        annotation = getattr(output, "speaker_diarization", output)
+        annotation = getattr(output, "exclusive_speaker_diarization", None)
+        if annotation is None:
+            annotation = getattr(output, "speaker_diarization", output)
         turns: List[Dict[str, Any]] = []
 
         if hasattr(annotation, "itertracks"):
@@ -198,6 +203,134 @@ def _overlap_ms(left_start: int, left_end: int, right_start: int, right_end: int
     return max(0, min(left_end, right_end) - max(left_start, right_start))
 
 
+def _clean_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _merge_same_speaker_pieces(pieces: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    for piece in pieces:
+        speaker = _clean_text(piece.get("speaker"))
+        if not speaker:
+            continue
+        start_ms = int(piece.get("start_ms") or 0)
+        end_ms = int(piece.get("end_ms") or start_ms)
+        if end_ms <= start_ms:
+            continue
+        if merged and merged[-1]["speaker"] == speaker:
+            merged[-1]["end_ms"] = max(int(merged[-1]["end_ms"]), end_ms)
+            merged[-1]["weight_ms"] = int(merged[-1].get("weight_ms") or 0) + int(piece.get("weight_ms") or 0)
+            continue
+        merged.append({**piece, "speaker": speaker, "start_ms": start_ms, "end_ms": end_ms})
+    return merged
+
+
+def _turn_pieces_for_segment(segment: Dict[str, Any], turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    start_ms = int(segment.get("start_ms") or 0)
+    end_ms = int(segment.get("end_ms") or start_ms)
+    if end_ms <= start_ms:
+        return []
+
+    pieces: List[Dict[str, Any]] = []
+    for turn in turns:
+        speaker = _clean_text(turn.get("speaker"))
+        if not speaker:
+            continue
+        turn_start = int(turn.get("start_ms") or 0)
+        turn_end = int(turn.get("end_ms") or turn_start)
+        overlap = _overlap_ms(start_ms, end_ms, turn_start, turn_end)
+        if overlap < MIN_DIARIZATION_SPLIT_OVERLAP_MS:
+            continue
+        pieces.append(
+            {
+                "start_ms": max(start_ms, turn_start),
+                "end_ms": min(end_ms, turn_end),
+                "speaker": speaker,
+                "weight_ms": overlap,
+            }
+        )
+
+    pieces.sort(key=lambda item: (int(item.get("start_ms") or 0), int(item.get("end_ms") or 0)))
+    pieces = _merge_same_speaker_pieces(pieces)
+    if len(pieces) < 2:
+        return pieces
+
+    adjusted: List[Dict[str, Any]] = []
+    for index, piece in enumerate(pieces):
+        adjusted_piece = dict(piece)
+        if index == 0:
+            adjusted_piece["start_ms"] = start_ms
+        else:
+            previous = adjusted[-1]
+            boundary = (int(previous["end_ms"]) + int(piece["start_ms"])) // 2
+            boundary = max(int(previous["start_ms"]) + 1, min(boundary, int(piece["end_ms"]) - 1))
+            previous["end_ms"] = boundary
+            adjusted_piece["start_ms"] = boundary
+        if index == len(pieces) - 1:
+            adjusted_piece["end_ms"] = end_ms
+        adjusted.append(adjusted_piece)
+
+    return [
+        piece
+        for piece in adjusted
+        if int(piece.get("end_ms") or 0) > int(piece.get("start_ms") or 0)
+    ]
+
+
+def _cut_score(text: str, index: int, target: int) -> tuple[int, int]:
+    boundary_bonus = 0
+    if index > 0 and text[index - 1] in SPLIT_BOUNDARY_CHARS:
+        boundary_bonus = 2
+    elif index < len(text) and text[index] in SPLIT_BOUNDARY_CHARS:
+        boundary_bonus = 1
+    return (-boundary_bonus, abs(index - target))
+
+
+def _nearest_text_cut(text: str, target: int, lower: int, upper: int) -> int:
+    lower = max(1, min(lower, len(text) - 1))
+    upper = max(lower, min(upper, len(text) - 1))
+    candidates = range(lower, upper + 1)
+    return min(candidates, key=lambda index: _cut_score(text, index, target))
+
+
+def _split_text_by_weights(text: str, weights: List[int]) -> List[str]:
+    clean = _clean_text(text)
+    if not clean or len(weights) <= 1:
+        return [clean] if clean else []
+    if len(clean) < len(weights) * MIN_DIARIZATION_SPLIT_CHARS:
+        return [clean]
+
+    total_weight = sum(max(1, int(weight or 0)) for weight in weights)
+    cuts: List[int] = []
+    consumed_weight = 0
+    previous_cut = 0
+    for index, weight in enumerate(weights[:-1], start=1):
+        consumed_weight += max(1, int(weight or 0))
+        target = round(len(clean) * consumed_weight / total_weight)
+        minimum = previous_cut + MIN_DIARIZATION_SPLIT_CHARS
+        maximum = len(clean) - MIN_DIARIZATION_SPLIT_CHARS * (len(weights) - index)
+        if minimum > maximum:
+            return [clean]
+        radius = max(8, len(clean) // 8)
+        lower = max(minimum, target - radius)
+        upper = min(maximum, target + radius)
+        cut = _nearest_text_cut(clean, target, lower, upper)
+        if cut <= previous_cut:
+            return [clean]
+        cuts.append(cut)
+        previous_cut = cut
+
+    parts: List[str] = []
+    start = 0
+    for cut in cuts + [len(clean)]:
+        part = clean[start:cut].strip()
+        if not part:
+            return [clean]
+        parts.append(part)
+        start = cut
+    return parts
+
+
 def assign_speakers(
     segments: List[Dict[str, Any]],
     turns: List[Dict[str, Any]],
@@ -223,3 +356,43 @@ def assign_speakers(
                 best_speaker = str(turn.get("speaker") or "")
         assigned.append({**segment, "speaker": best_speaker or segment.get("speaker") or ""})
     return assigned
+
+
+def split_segments_by_turns(
+    segments: List[Dict[str, Any]],
+    turns: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    if not turns:
+        return segments
+
+    split_segments: List[Dict[str, Any]] = []
+    for segment in segments:
+        text = _clean_text(segment.get("text"))
+        pieces = _turn_pieces_for_segment(segment, turns)
+        if not pieces:
+            split_segments.append(assign_speakers([segment], turns)[0])
+            continue
+        if len(pieces) == 1:
+            split_segments.append({**segment, "speaker": pieces[0]["speaker"]})
+            continue
+
+        text_parts = _split_text_by_weights(
+            text,
+            [int(piece.get("weight_ms") or 0) for piece in pieces],
+        )
+        if len(text_parts) != len(pieces):
+            best_piece = max(pieces, key=lambda item: int(item.get("weight_ms") or 0))
+            split_segments.append({**segment, "speaker": best_piece["speaker"]})
+            continue
+
+        for piece, part_text in zip(pieces, text_parts):
+            split_segments.append(
+                {
+                    **segment,
+                    "start_ms": int(piece["start_ms"]),
+                    "end_ms": int(piece["end_ms"]),
+                    "speaker": piece["speaker"],
+                    "text": part_text,
+                }
+            )
+    return split_segments

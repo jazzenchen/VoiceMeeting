@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from .diarization import DiarizationUnavailable, PyannoteDiarizer, assign_speakers
+from .diarization import DiarizationUnavailable, PyannoteDiarizer, assign_speakers, split_segments_by_turns
 from .speaker_tracker import SpeakerTracker, SpeakerTrackingUnavailable
 from .storage import MeetingStore
 from .transcript import is_unrecognized_text
@@ -120,7 +120,9 @@ class ChunkTranscriptionPipeline:
         try:
             self.store.update_chunk(chunk_id, status="diarizing")
             turns = await asyncio.to_thread(active_diarizer.diarize, wav_path)
-            if requested_speaker_mode == "diarization" or not self.speaker_tracker.enabled:
+            if requested_speaker_mode == "diarization":
+                asr_result["segments"] = split_segments_by_turns(asr_result["segments"], turns)
+            elif not self.speaker_tracker.enabled:
                 asr_result["segments"] = assign_speakers(asr_result["segments"], turns)
             return {
                 "status": "done",
