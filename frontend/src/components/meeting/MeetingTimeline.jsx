@@ -287,6 +287,78 @@ function shapeAudioAmplitude(value, floor, ceiling) {
   return Math.max(0.018, Math.min(1, powerNorm * 0.86 + dbNorm * 0.14));
 }
 
+function apiUrl(path) {
+  const value = String(path || "").trim();
+  if (!value) return "";
+  if (/^https?:\/\//i.test(value)) return value;
+  return `${API_BASE}${value.startsWith("/") ? value : `/${value}`}`;
+}
+
+function waveformFromBins(bins) {
+  const raw = bins.map((bin) => (bin.hasAudio ? Math.max(bin.peak * 0.82, bin.rms * 3.2) : 0));
+  const floor = percentile(raw, 0.16) * 0.9;
+  const ceiling = percentile(raw, 0.965);
+  const normalized = smoothAmplitudes(raw.map((value) => shapeAudioAmplitude(value, floor, ceiling)));
+  return normalized.map((amplitude, index) => ({
+    amplitude,
+    hasAudio: bins[index].hasAudio,
+  }));
+}
+
+async function decodeAudioUrlWaveform(audioUrl, durationMs, signal, onProgress) {
+  if (!audioUrl || durationMs <= 0) return null;
+  const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextCtor) return null;
+
+  const bins = Array.from({ length: WAVEFORM_BAR_COUNT }, () => ({
+    peak: 0,
+    rms: 0,
+    samples: 0,
+    hasAudio: false,
+  }));
+  const context = new AudioContextCtor();
+  try {
+    const response = await fetch(apiUrl(audioUrl), { signal });
+    if (!response.ok) return null;
+    const audioBuffer = await context.decodeAudioData(await response.arrayBuffer());
+    if (signal?.aborted) return null;
+    const channel = audioBuffer.getChannelData(0);
+    const sampleRate = audioBuffer.sampleRate;
+    for (let index = 0; index < WAVEFORM_BAR_COUNT; index += 1) {
+      const windowStartMs = durationMs * index / WAVEFORM_BAR_COUNT;
+      const windowEndMs = durationMs * (index + 1) / WAVEFORM_BAR_COUNT;
+      const localStartSec = Math.max(0, windowStartMs / 1000);
+      const localEndSec = Math.min(audioBuffer.duration, windowEndMs / 1000);
+      if (localEndSec <= localStartSec) continue;
+
+      const startSample = Math.max(0, Math.floor(localStartSec * sampleRate));
+      const endSample = Math.min(channel.length, Math.ceil(localEndSec * sampleRate));
+      const stride = Math.max(1, Math.floor((endSample - startSample) / 240));
+      let peak = 0;
+      let sum = 0;
+      let count = 0;
+      for (let sample = startSample; sample < endSample; sample += stride) {
+        const value = Math.abs(channel[sample] || 0);
+        if (value > peak) peak = value;
+        sum += value * value;
+        count += 1;
+      }
+      if (!count) continue;
+      const rms = Math.sqrt(sum / count);
+      bins[index].peak = peak;
+      bins[index].rms = rms;
+      bins[index].samples = count;
+      bins[index].hasAudio = true;
+      if (index % 16 === 0) onProgress?.(Math.max(0, Math.min(1, index / WAVEFORM_BAR_COUNT)));
+    }
+  } finally {
+    context.close().catch(() => {});
+  }
+
+  onProgress?.(1);
+  return waveformFromBins(bins);
+}
+
 async function decodeMeetingWaveform(meetingId, chunks, durationMs, signal, onProgress) {
   if (!meetingId || !chunks.length || durationMs <= 0) return null;
   const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
@@ -362,14 +434,7 @@ async function decodeMeetingWaveform(meetingId, chunks, durationMs, signal, onPr
     context.close().catch(() => {});
   }
 
-  const raw = bins.map((bin) => (bin.hasAudio ? Math.max(bin.peak * 0.82, bin.rms * 3.2) : 0));
-  const floor = percentile(raw, 0.16) * 0.9;
-  const ceiling = percentile(raw, 0.965);
-  const normalized = smoothAmplitudes(raw.map((value) => shapeAudioAmplitude(value, floor, ceiling)));
-  return normalized.map((amplitude, index) => ({
-    amplitude,
-    hasAudio: bins[index].hasAudio,
-  }));
+  return waveformFromBins(bins);
 }
 
 export function MeetingTimeline({
@@ -399,11 +464,20 @@ export function MeetingTimeline({
   const lastPartEnd = Math.max(0, ...parts.map((part) => Number(part.end_ms) || Number(part.start_ms) || 0));
   const lastChunkEnd = Math.max(0, ...chunks.map(chunkEndMs));
   const liveMode = Boolean(recording);
+  const canonicalAudioUrl = liveMode ? "" : String(meeting?.audio?.audio_url || "");
+  const canonicalAudioDurationMs = liveMode ? 0 : Number(meeting?.audio?.duration_ms) || 0;
+  const hasCanonicalAudio = Boolean(canonicalAudioUrl && canonicalAudioDurationMs > 0);
   const liveBars = Array.isArray(liveWaveformBars) ? liveWaveformBars : [];
-  const baseDurationMs = Math.max(lastPartEnd, lastChunkEnd, parts.length || chunks.length ? 1000 : 120000);
+  const baseDurationMs = Math.max(
+    canonicalAudioDurationMs,
+    lastPartEnd,
+    lastChunkEnd,
+    parts.length || chunks.length || hasCanonicalAudio ? 1000 : 120000,
+  );
   const durationMs = liveMode ? Math.max(Number(liveRecordingMs) || 0, lastChunkEnd, 1000) : baseDurationMs;
   const playheadMs = liveMode ? durationMs : Number.isFinite(playbackPositionMs) ? playbackPositionMs : 0;
   const displayPlayheadMs = liveMode ? durationMs : scrubbing && Number.isFinite(scrubMs) ? scrubMs : playheadMs;
+  const canNavigate = !liveMode && (hasCanonicalAudio || parts.length > 0 || chunks.length > 0);
   const pct = (value) => Math.max(0, Math.min(100, (Number(value) || 0) * 100 / durationMs));
   const speakerNames = useMemo(() => orderedSpeakers(parts), [parts]);
   const speakerIndexByName = useMemo(
@@ -432,6 +506,9 @@ export function MeetingTimeline({
       duration_ms: chunk.duration_ms,
     }))
   ), [chunkSignature]);
+  const audioSignature = hasCanonicalAudio
+    ? `${canonicalAudioUrl}:${canonicalAudioDurationMs}`
+    : "";
 
   useEffect(() => {
     if (liveMode) {
@@ -440,13 +517,13 @@ export function MeetingTimeline({
       setWaveformProgress(0);
       return undefined;
     }
-    if (!meeting?.id || !chunkSignature) {
+    if (!meeting?.id || (!audioSignature && !chunkSignature)) {
       setAudioWaveform(null);
       setWaveformLoading(false);
       setWaveformProgress(0);
       return undefined;
     }
-    const cacheKey = `${meeting.id}:${chunkSignature}:${durationMs}`;
+    const cacheKey = `${meeting.id}:${audioSignature || chunkSignature}:${durationMs}`;
     const cached = waveformCacheRef.current.get(cacheKey);
     if (cached) {
       setAudioWaveform(cached);
@@ -459,9 +536,14 @@ export function MeetingTimeline({
     setAudioWaveform(null);
     setWaveformLoading(true);
     setWaveformProgress(0);
-    decodeMeetingWaveform(meeting.id, waveformChunks, durationMs, controller.signal, (progress) => {
-      if (!controller.signal.aborted) setWaveformProgress(progress);
-    })
+    const decode = audioSignature
+      ? decodeAudioUrlWaveform(canonicalAudioUrl, durationMs, controller.signal, (progress) => {
+        if (!controller.signal.aborted) setWaveformProgress(progress);
+      })
+      : decodeMeetingWaveform(meeting.id, waveformChunks, durationMs, controller.signal, (progress) => {
+        if (!controller.signal.aborted) setWaveformProgress(progress);
+      });
+    decode
       .then((waveform) => {
         if (!controller.signal.aborted) {
           if (waveform) {
@@ -483,7 +565,15 @@ export function MeetingTimeline({
         }
       });
     return () => controller.abort();
-  }, [chunkSignature, durationMs, liveMode, meeting?.id, waveformChunks]);
+  }, [
+    audioSignature,
+    canonicalAudioUrl,
+    chunkSignature,
+    durationMs,
+    liveMode,
+    meeting?.id,
+    waveformChunks,
+  ]);
 
   const bars = useMemo(() => (
     Array.from({ length: WAVEFORM_BAR_COUNT }, (_, index) => {
@@ -523,7 +613,7 @@ export function MeetingTimeline({
       const speakerIndex = part?.speaker ? speakerIndexByName.get(part.speaker) ?? 0 : -1;
       return {
         amplitude,
-        active: Boolean(part) && amplitude > 0.025,
+        active: Boolean(part || audioBin?.hasAudio) && amplitude > 0.025,
         hasAudio: Boolean(audioBin?.hasAudio),
         speakerIndex,
       };
@@ -531,6 +621,7 @@ export function MeetingTimeline({
   ), [audioWaveform, durationMs, liveBars, liveMode, parts, speakerIndexByName]);
 
   const jumpBy = (direction) => {
+    if (!canNavigate) return;
     onJump(Math.max(0, Math.min(durationMs, playheadMs + direction * jumpStepMs)));
   };
   const pointerToMs = (event) => {
@@ -546,7 +637,7 @@ export function MeetingTimeline({
     return next;
   };
   const startScrub = (event) => {
-    if (liveMode || (!parts.length && !chunks.length)) return;
+    if (!canNavigate) return;
     event.preventDefault();
     event.currentTarget.setPointerCapture?.(event.pointerId);
     setScrubbing(true);
@@ -602,7 +693,7 @@ export function MeetingTimeline({
             size="icon"
             className="tl-pb"
             onClick={() => jumpBy(-1)}
-            disabled={!parts.length && !chunks.length}
+            disabled={!canNavigate}
             title={t("后退 {seconds} 秒", { seconds: jumpStepMs / 1000 })}
           >
             <SkipBack size={15} />
@@ -613,7 +704,7 @@ export function MeetingTimeline({
             size="icon"
             className="tl-pb play"
             onClick={onPlayToggle}
-            disabled={playbackBusy || (!parts.length && !chunks.length)}
+            disabled={playbackBusy || !canNavigate}
             title={playing ? t("暂停回放") : t("开始回放")}
           >
             {playing ? <Pause size={14} /> : <Play size={14} />}
@@ -624,7 +715,7 @@ export function MeetingTimeline({
             size="icon"
             className="tl-pb"
             onClick={() => jumpBy(1)}
-            disabled={!parts.length && !chunks.length}
+            disabled={!canNavigate}
             title={t("快进 {seconds} 秒", { seconds: jumpStepMs / 1000 })}
           >
             <SkipForward size={15} />

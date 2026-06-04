@@ -71,6 +71,7 @@ export function TopBar({
     : "";
   const durationMs = Math.max(
     0,
+    Number(meeting?.audio?.duration_ms) || 0,
     ...((meeting?.chunks || []).map((chunk) => Number(chunk.ended_at_ms) || Number(chunk.duration_ms) || 0)),
     ...((meeting?.segments || []).map((segment) => Number(segment.end_ms) || Number(segment.start_ms) || 0)),
     ...((meeting?.utterances || []).map((segment) => Number(segment.end_ms) || Number(segment.start_ms) || 0)),

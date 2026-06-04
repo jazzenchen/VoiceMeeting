@@ -53,6 +53,7 @@ function activeMeetingMeta(meeting, t) {
   if (!meeting?.id) return "";
   const durationMs = Math.max(
     0,
+    Number(meeting.audio?.duration_ms) || 0,
     ...((meeting.chunks || []).map((chunk) => Number(chunk.ended_at_ms) || Number(chunk.duration_ms) || 0)),
     ...((meeting.utterances || []).map((item) => Number(item.end_ms) || Number(item.start_ms) || 0)),
     ...((meeting.segments || []).map((item) => Number(item.end_ms) || Number(item.start_ms) || 0)),
