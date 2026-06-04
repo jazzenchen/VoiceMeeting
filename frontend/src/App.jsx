@@ -92,6 +92,7 @@ function previewMeetingFromSummary(item) {
 
 function globalPlaybackShortcutTarget(target) {
   if (!target || typeof target.closest !== "function") return false;
+  if (target.closest(".rail-open")) return false;
   if (target.isContentEditable) return true;
   return Boolean(target.closest([
     "input",

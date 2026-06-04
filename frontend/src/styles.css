@@ -3977,6 +3977,10 @@ a {
   cursor: not-allowed;
 }
 
+.rail-open:focus {
+  outline: none;
+}
+
 .rail-open .title {
   min-width: 0;
   overflow: hidden;

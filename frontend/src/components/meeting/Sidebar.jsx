@@ -194,7 +194,10 @@ export function Sidebar({
               <button
                 className="rail-open"
                 type="button"
-                onClick={() => loadMeeting(item.id)}
+                onClick={(event) => {
+                  event.currentTarget.blur();
+                  loadMeeting(item.id);
+                }}
                 disabled={interactionLocked}
                 title={interactionLocked ? t("处理中，暂时不能切换会议") : undefined}
               >
