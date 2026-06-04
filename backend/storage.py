@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .config import CHUNKS_DIR, DB_PATH, MEETINGS_DIR, ensure_runtime_dirs
-from .transcript import build_utterances, is_unrecognized_text
+from .transcript import build_utterances, is_unrecognized_text, logical_segments
 
 
 DEFAULT_SUMMARY: Dict[str, Any] = {
@@ -86,6 +86,8 @@ class MeetingStore:
                     chunk_id TEXT NOT NULL,
                     start_ms INTEGER NOT NULL DEFAULT 0,
                     end_ms INTEGER NOT NULL DEFAULT 0,
+                    absolute_start_ms INTEGER,
+                    absolute_end_ms INTEGER,
                     speaker TEXT NOT NULL DEFAULT '',
                     text TEXT NOT NULL,
                     confidence REAL,
@@ -186,14 +188,42 @@ class MeetingStore:
             "segments",
             {
                 "version_id": "ALTER TABLE segments ADD COLUMN version_id TEXT NOT NULL DEFAULT 'auto'",
+                "absolute_start_ms": "ALTER TABLE segments ADD COLUMN absolute_start_ms INTEGER",
+                "absolute_end_ms": "ALTER TABLE segments ADD COLUMN absolute_end_ms INTEGER",
             },
         )
         conn.execute("UPDATE meetings SET active_version_id = 'auto' WHERE active_version_id = ''")
         conn.execute("UPDATE segments SET version_id = 'auto' WHERE version_id = ''")
         conn.execute(
             """
+            UPDATE segments
+            SET absolute_start_ms = COALESCE(
+                    (SELECT chunks.started_at_ms FROM chunks WHERE chunks.id = segments.chunk_id),
+                    0
+                ) + start_ms
+            WHERE absolute_start_ms IS NULL
+            """
+        )
+        conn.execute(
+            """
+            UPDATE segments
+            SET absolute_end_ms = COALESCE(
+                    (SELECT chunks.started_at_ms FROM chunks WHERE chunks.id = segments.chunk_id),
+                    0
+                ) + end_ms
+            WHERE absolute_end_ms IS NULL
+            """
+        )
+        conn.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_segments_meeting_version_created
                 ON segments(meeting_id, version_id, created_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_segments_meeting_version_absolute
+                ON segments(meeting_id, version_id, absolute_start_ms)
             """
         )
         conn.execute(
@@ -243,12 +273,18 @@ class MeetingStore:
         version_id: str,
         segments: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
+        def timeline_ms(segment: Dict[str, Any], absolute_key: str, relative_key: str) -> int:
+            value = segment.get(absolute_key)
+            if value is None:
+                value = segment.get(relative_key)
+            return int(value or 0)
+
         payload = [
             {
                 "speaker": str(segment.get("speaker") or ""),
                 "text": str(segment.get("text") or "").strip(),
-                "start_ms": int(segment.get("start_ms") or 0),
-                "end_ms": int(segment.get("end_ms") or 0),
+                "start_ms": timeline_ms(segment, "absolute_start_ms", "start_ms"),
+                "end_ms": timeline_ms(segment, "absolute_end_ms", "end_ms"),
                 "chunk_id": str(segment.get("chunk_id") or ""),
             }
             for segment in segments
@@ -488,7 +524,7 @@ class MeetingStore:
             "final_source_hash": final_source_hash,
             "final_source_version_id": final_source_version_id,
             "final_markdown": final_markdown,
-            "segments": segment_rows,
+            "segments": logical_segments(segment_rows, chunk_rows),
             "utterances": build_utterances(segment_rows, chunk_rows),
             "chunks": chunk_rows,
             "speakers": speaker_rows,
@@ -719,9 +755,10 @@ class MeetingStore:
                     INSERT INTO segments
                     (
                         id, meeting_id, version_id, chunk_id, start_ms, end_ms,
+                        absolute_start_ms, absolute_end_ms,
                         speaker, text, confidence, created_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         uuid.uuid4().hex,
@@ -730,6 +767,8 @@ class MeetingStore:
                         row["chunk_id"],
                         row["start_ms"],
                         row["end_ms"],
+                        row["absolute_start_ms"],
+                        row["absolute_end_ms"],
                         row["speaker"],
                         row["text"],
                         row["confidence"],
@@ -748,7 +787,10 @@ class MeetingStore:
                 LEFT JOIN chunks ON chunks.id = segments.chunk_id
                 WHERE segments.meeting_id = ? AND segments.version_id = ?
                 ORDER BY
-                    COALESCE(chunks.started_at_ms, chunks.seq, 0) ASC,
+                    COALESCE(
+                        segments.absolute_start_ms,
+                        COALESCE(chunks.started_at_ms, chunks.seq, 0) + segments.start_ms
+                    ) ASC,
                     segments.start_ms ASC,
                     segments.created_at ASC
                 """,
@@ -804,9 +846,10 @@ class MeetingStore:
                     INSERT INTO segments
                     (
                         id, meeting_id, version_id, chunk_id, start_ms, end_ms,
+                        absolute_start_ms, absolute_end_ms,
                         speaker, text, confidence, created_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         uuid.uuid4().hex,
@@ -815,6 +858,8 @@ class MeetingStore:
                         row["chunk_id"],
                         row["start_ms"],
                         row["end_ms"],
+                        row["absolute_start_ms"],
+                        row["absolute_end_ms"],
                         row["speaker"],
                         row["text"],
                         row["confidence"],
@@ -1052,16 +1097,22 @@ class MeetingStore:
         inserted = []
         with self._lock, self._connect() as conn:
             resolved_version_id = version_id or self._active_version_id(conn, meeting_id)
+            chunk_row = conn.execute("SELECT started_at_ms FROM chunks WHERE id = ?", (chunk_id,)).fetchone()
+            chunk_start_ms = int((chunk_row or {})["started_at_ms"] or 0) if chunk_row is not None else 0
             for segment in segments:
                 segment_id = uuid.uuid4().hex
                 stamp = now_iso()
+                start_ms = int(segment.get("start_ms") or 0)
+                end_ms = int(segment.get("end_ms") or 0)
                 row = {
                     "id": segment_id,
                     "meeting_id": meeting_id,
                     "version_id": resolved_version_id,
                     "chunk_id": chunk_id,
-                    "start_ms": int(segment.get("start_ms") or 0),
-                    "end_ms": int(segment.get("end_ms") or 0),
+                    "start_ms": start_ms,
+                    "end_ms": end_ms,
+                    "absolute_start_ms": chunk_start_ms + start_ms,
+                    "absolute_end_ms": chunk_start_ms + end_ms,
                     "speaker": str(segment.get("speaker") or ""),
                     "text": str(segment.get("text") or "").strip(),
                     "confidence": segment.get("confidence"),
@@ -1074,9 +1125,10 @@ class MeetingStore:
                     INSERT INTO segments
                     (
                         id, meeting_id, version_id, chunk_id, start_ms, end_ms,
+                        absolute_start_ms, absolute_end_ms,
                         speaker, text, confidence, created_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         row["id"],
@@ -1085,6 +1137,8 @@ class MeetingStore:
                         row["chunk_id"],
                         row["start_ms"],
                         row["end_ms"],
+                        row["absolute_start_ms"],
+                        row["absolute_end_ms"],
                         row["speaker"],
                         row["text"],
                         row["confidence"],

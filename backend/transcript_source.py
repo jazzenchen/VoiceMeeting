@@ -7,14 +7,21 @@ from typing import Any, Dict, Optional
 from .transcript import is_unrecognized_text
 
 
+def _timeline_ms(segment: Dict[str, Any], absolute_key: str, relative_key: str) -> int:
+    value = segment.get(absolute_key)
+    if value is None:
+        value = segment.get(relative_key)
+    return int(value or 0)
+
+
 def transcript_source(meeting: Dict[str, Any], segments: Optional[list[Dict[str, Any]]] = None) -> Dict[str, Any]:
     segment_rows = list(segments if segments is not None else meeting.get("segments") or [])
     payload = [
         {
             "speaker": str(segment.get("speaker") or ""),
             "text": str(segment.get("text") or "").strip(),
-            "start_ms": int(segment.get("start_ms") or 0),
-            "end_ms": int(segment.get("end_ms") or 0),
+            "start_ms": _timeline_ms(segment, "absolute_start_ms", "start_ms"),
+            "end_ms": _timeline_ms(segment, "absolute_end_ms", "end_ms"),
             "chunk_id": str(segment.get("chunk_id") or ""),
         }
         for segment in segment_rows

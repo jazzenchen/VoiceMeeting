@@ -22,6 +22,15 @@ def _to_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _to_optional_int(value: Any) -> Optional[int]:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _speaker(value: Any) -> str:
     text = str(value or "").strip()
     return text or "Speaker"
@@ -103,8 +112,12 @@ def _part_from_segment(segment: Dict[str, Any], text: str) -> Dict[str, Any]:
 def _absolute_segment(segment: Dict[str, Any], chunk_map: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     chunk = chunk_map.get(segment.get("chunk_id") or "") or {}
     base_ms = _to_int(chunk.get("started_at_ms"), 0)
-    start_ms = base_ms + _to_int(segment.get("start_ms"), 0)
-    end_ms = base_ms + _to_int(segment.get("end_ms"), 0)
+    start_ms = _to_optional_int(segment.get("absolute_start_ms"))
+    end_ms = _to_optional_int(segment.get("absolute_end_ms"))
+    if start_ms is None:
+        start_ms = base_ms + _to_int(segment.get("start_ms"), 0)
+    if end_ms is None:
+        end_ms = base_ms + _to_int(segment.get("end_ms"), 0)
     if end_ms < start_ms:
         end_ms = start_ms
     return {
@@ -114,6 +127,33 @@ def _absolute_segment(segment: Dict[str, Any], chunk_map: Dict[str, Dict[str, An
         "absolute_end_ms": end_ms,
         "chunk_seq": _to_int(chunk.get("seq"), 0),
     }
+
+
+def logical_segments(
+    segments: List[Dict[str, Any]],
+    chunks: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    chunk_map = {chunk.get("id"): chunk for chunk in chunks if chunk.get("id")}
+    items: List[Dict[str, Any]] = []
+    for segment in segments:
+        absolute = _absolute_segment(segment, chunk_map)
+        items.append(
+            {
+                **absolute,
+                "relative_start_ms": _to_int(segment.get("start_ms")),
+                "relative_end_ms": _to_int(segment.get("end_ms")),
+                "start_ms": _to_int(absolute.get("absolute_start_ms")),
+                "end_ms": _to_int(absolute.get("absolute_end_ms")),
+            }
+        )
+    return sorted(
+        items,
+        key=lambda item: (
+            _to_int(item.get("absolute_start_ms")),
+            _to_int(item.get("chunk_seq")),
+            str(item.get("created_at") or ""),
+        ),
+    )
 
 
 def _should_merge(current: Dict[str, Any], segment: Dict[str, Any]) -> bool:
