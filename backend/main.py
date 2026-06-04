@@ -1179,16 +1179,18 @@ async def playback_manifest(meeting_id: str) -> Dict[str, Any]:
         audio = None
     if audio:
         duration_ms = int(audio.get("duration_ms") or 0)
+        audio_version = f"{int(audio.get('chunk_count') or 0)}-{duration_ms}"
+        audio_url = f"/api/meetings/{meeting_id}/audio?v={audio_version}"
         return {
             "meeting_id": meeting_id,
             "audio": {
-                "audio_url": f"/api/meetings/{meeting_id}/audio",
+                "audio_url": audio_url,
                 "duration_ms": duration_ms,
                 "chunk_count": audio.get("chunk_count") or 0,
             },
             "chunks": [
                 {
-                    "id": "meeting-audio",
+                    "id": f"meeting-audio-{audio_version}",
                     "seq": 0,
                     "client_chunk_id": "",
                     "started_at_ms": 0,
@@ -1197,7 +1199,7 @@ async def playback_manifest(meeting_id: str) -> Dict[str, Any]:
                     "trim_start_ms": 0,
                     "playable_duration_ms": duration_ms,
                     "cut_reason": "完整会议音频",
-                    "audio_url": f"/api/meetings/{meeting_id}/audio",
+                    "audio_url": audio_url,
                 }
             ],
         }
