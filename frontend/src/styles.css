@@ -3125,6 +3125,11 @@ a {
   padding: 0 20px 40px 24px;
 }
 
+.app-shell .transcript-pane > .error-line,
+.app-shell .notes-pane > .error-line {
+  margin: 0 24px 18px;
+}
+
 .app-shell .segment {
   position: relative;
   display: grid;
