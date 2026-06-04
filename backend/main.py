@@ -1174,7 +1174,11 @@ async def playback_manifest(meeting_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="找不到这场会议，可能已经被删除。")
 
     try:
-        audio = ensure_meeting_audio(meeting.get("chunks") or [], meeting_audio_path(meeting_id))
+        audio = await asyncio.to_thread(
+            ensure_meeting_audio,
+            meeting.get("chunks") or [],
+            meeting_audio_path(meeting_id),
+        )
     except Exception:
         audio = None
     if audio:
@@ -1364,13 +1368,19 @@ async def upload_chunk(
         store.update_chunk(chunk["id"], status="error", error=str(exc))
         raise HTTPException(status_code=500, detail=str(exc))
 
-    meeting = store.get_meeting(meeting_id)
     if transcription.inserted:
         store.clear_final_markdown(meeting_id)
+    meeting = store.get_meeting(meeting_id)
+    inserted_ids = {str(segment.get("id") or "") for segment in transcription.inserted}
+    inserted_segments = [
+        segment
+        for segment in meeting.get("segments") or []
+        if str(segment.get("id") or "") in inserted_ids
+    ]
 
     return {
         "chunk": store.get_chunk(chunk["id"]),
-        "segments": transcription.inserted,
+        "segments": inserted_segments,
         "utterances": meeting.get("utterances") or [],
         "summary": meeting["summary"],
         "runtime": meeting_runtime(meeting_id),
