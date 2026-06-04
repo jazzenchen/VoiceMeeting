@@ -47,7 +47,12 @@ export function userFriendlyError(message) {
   if (lower.includes("timed out") || lower.includes("timeout")) return "生成时间太久，已停止等待。请稍后重试。";
   if (lower.includes("empty audio")) return "这段音频为空，请重新录制或导入。";
   if (lower.includes("unsupported asr language")) return "当前语言暂不支持，请换一种语言设置。";
-  if (lower.includes("asr model is not available locally")) return "本地还没有这套识别资源，请选择已有的识别方式。";
+  if (
+    lower.includes("asr model is not available locally")
+    || detail.includes("本地还没有这套识别资源")
+  ) {
+    return "";
+  }
   if (lower.includes("unsupported asr model")) return "当前识别方式不可用，请换一个选项。";
   if (lower === "not found" || lower.includes('"not found"')) {
     return "当前本地语音服务版本过旧，请完全退出旧版 VoiceMeeting 后重新打开。";
