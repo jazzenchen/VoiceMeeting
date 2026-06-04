@@ -928,6 +928,10 @@ a {
   white-space: nowrap;
 }
 
+.transcript-status-text {
+  flex: 1 1 auto;
+}
+
 .transcript-version-select {
   max-width: 190px;
   min-width: 112px;
@@ -941,6 +945,15 @@ a {
   font-size: 11.5px;
   font-weight: 700;
   outline: none;
+}
+
+.transcript-version-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: min(300px, 100%);
+  flex: 0 1 auto;
 }
 
 .transcript-version-menu {

@@ -146,6 +146,15 @@ class ASRRuntime:
     def is_loaded(self, model_name: str) -> bool:
         return any(loaded_model == model_name for loaded_model, _engine in self.loaded_engine_items())
 
+    def unload_model(self, model_name: str) -> None:
+        requested_model = self._validate_model(model_name)
+        if requested_model == self.default_model:
+            engine = self.default_engine
+        else:
+            engine = self.engines.get(requested_model)
+        if engine is not None:
+            engine.unload()
+
     def _validate_model(self, model_name: str) -> str:
         requested_model = (model_name or self.default_model).strip()
         if requested_model not in SUPPORTED_ASR_MODELS:

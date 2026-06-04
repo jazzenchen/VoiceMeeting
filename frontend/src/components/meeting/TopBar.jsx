@@ -10,6 +10,7 @@ import {
   progressPercent,
   runtimeLine,
   serviceStatusText,
+  speakerModeName,
 } from "@/lib/meeting-display";
 import { useI18n } from "@/lib/i18n";
 
@@ -57,6 +58,7 @@ export function TopBar({
   activeModelDownload,
   activeModelDownloadMeta,
   recording,
+  speakerMode,
   micLevel,
   appearance,
   onToggleTheme,
@@ -87,6 +89,7 @@ export function TopBar({
       : (modelStatus?.last_error || modelStatus?.load_error)
         ? "offline"
         : "unknown";
+  const speakerModeText = `${t("说话人")} · ${t(speakerModeName(speakerMode))}`;
 
   return (
     <header className="topbar">
@@ -105,6 +108,7 @@ export function TopBar({
         <div className="status-strip">
           <span className={`pill ${servicePillClass}`}>{t("本地服务")} · {t(serviceCompactText(status.backend))}</span>
           {asrPillText && <span className={`pill ${asrPillClass}`}>{asrPillText}</span>}
+          <span className="pill ready">{speakerModeText}</span>
           <span className={`pill ${status.vibe}`}>
             {compactStatusText(assistantStatusText(llmStatus)).replace(/^LLM 模型接口\s*·\s*/u, "LLM 模型接口 ")}
           </span>

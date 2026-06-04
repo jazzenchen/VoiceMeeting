@@ -16,7 +16,6 @@ import {
 } from "lucide-react";
 
 import {
-  formatAsrDisplay,
   formatOffset,
   formatTime,
   isUnrecognizedTranscriptItem,
@@ -56,8 +55,6 @@ export function TranscriptPane({
   activeVersionId,
   activateTranscriptVersion,
   deleteTranscriptVersion,
-  lastAsr,
-  asrLanguage,
   downloadTranscript,
   transcriptDownloading,
   recording,
@@ -106,23 +103,17 @@ export function TranscriptPane({
   const recognizedItems = useMemo(() => recognizedTranscriptItems(transcriptItems), [transcriptItems]);
   const hasRecognizedTranscript = recognizedItems.length > 0;
   const transcriptDescription = useMemo(() => {
-    const bits = [
-      formatAsrDisplay(lastAsr, asrLanguage),
-    ];
-    if (asrWorking) bits.push(runtimeLine(runtimeStatus, pendingChunks, t) || t("处理中"));
-    if (bits.length === 0) {
-      bits.push(transcriptVersionName(activeTranscriptVersion, meeting?.active_version_id || "auto"));
-    }
-    return bits.filter(Boolean).join(" · ");
+    if (asrWorking) return runtimeLine(runtimeStatus, pendingChunks, t) || t("处理中");
+    if (versions.length === 0) return transcriptVersionName(activeTranscriptVersion, meeting?.active_version_id || "auto");
+    return "";
   }, [
     activeTranscriptVersion,
-    asrLanguage,
     asrWorking,
-    lastAsr,
     meeting?.active_version_id,
     pendingChunks,
     runtimeStatus,
     t,
+    versions.length,
   ]);
   const activeSegmentId = useMemo(() => {
     if (!Number.isFinite(playbackPositionMs)) return "";
@@ -231,54 +222,56 @@ export function TranscriptPane({
           <h2>{t("实时文字")}</h2>
           <div className="transcript-meta-line" aria-label={t("选择稿件版本")}>
             {versions.length > 0 && (
-              <div className="transcript-version-menu" ref={versionMenuRef}>
-                <button
-                  type="button"
-                  className="transcript-version-trigger"
-                  onClick={() => setVersionMenuOpen((value) => !value)}
-                  disabled={!meeting || reprocessWorking || editBusy || versions.length < 2}
-                  title={t("选择稿件版本")}
-                  aria-haspopup="listbox"
-                  aria-expanded={versionMenuOpen}
-                >
-                  <span>{transcriptVersionOption(selectedVersion || versions[0], t)}</span>
-                  <ChevronDown size={13} />
-                </button>
-                {versionMenuOpen && (
-                  <div className="transcript-version-dropdown" role="listbox" aria-label={t("选择稿件版本")}>
-                    {versions.map((version) => {
-                      const active = version.id === selectedVersionId;
-                      return (
-                        <button
-                          type="button"
-                          role="option"
-                          aria-selected={active}
-                          className={active ? "active" : ""}
-                          key={version.id}
-                          onClick={() => selectVersion(version)}
-                        >
-                          <span>{transcriptVersionOption(version, t)}</span>
-                          {active && <Check size={13} />}
-                        </button>
-                      );
-                    })}
-                  </div>
+              <div className="transcript-version-actions">
+                <div className="transcript-version-menu" ref={versionMenuRef}>
+                  <button
+                    type="button"
+                    className="transcript-version-trigger"
+                    onClick={() => setVersionMenuOpen((value) => !value)}
+                    disabled={!meeting || reprocessWorking || editBusy || versions.length < 2}
+                    title={t("选择稿件版本")}
+                    aria-haspopup="listbox"
+                    aria-expanded={versionMenuOpen}
+                  >
+                    <span>{transcriptVersionOption(selectedVersion || versions[0], t)}</span>
+                    <ChevronDown size={13} />
+                  </button>
+                  {versionMenuOpen && (
+                    <div className="transcript-version-dropdown" role="listbox" aria-label={t("选择稿件版本")}>
+                      {versions.map((version) => {
+                        const active = version.id === selectedVersionId;
+                        return (
+                          <button
+                            type="button"
+                            role="option"
+                            aria-selected={active}
+                            className={active ? "active" : ""}
+                            key={version.id}
+                            onClick={() => selectVersion(version)}
+                          >
+                            <span>{transcriptVersionOption(version, t)}</span>
+                            {active && <Check size={13} />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+                {canDeleteSelectedVersion && (
+                  <button
+                    type="button"
+                    className="version-delete-button"
+                    onClick={() => deleteTranscriptVersion?.(selectedVersion.id)}
+                    disabled={!meeting || reprocessWorking || editBusy}
+                    title={t("删除当前稿件")}
+                    aria-label={t("删除当前稿件")}
+                  >
+                    <Trash2 size={13} />
+                  </button>
                 )}
               </div>
             )}
-            {canDeleteSelectedVersion && (
-              <button
-                type="button"
-                className="version-delete-button"
-                onClick={() => deleteTranscriptVersion?.(selectedVersion.id)}
-                disabled={!meeting || reprocessWorking || editBusy}
-                title={t("删除当前稿件")}
-                aria-label={t("删除当前稿件")}
-              >
-                <Trash2 size={13} />
-              </button>
-            )}
-            <span>{transcriptDescription}</span>
+            {transcriptDescription && <span className="transcript-status-text">{transcriptDescription}</span>}
           </div>
         </div>
         <div className="pane-actions transcript-tools">

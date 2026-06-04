@@ -14,12 +14,8 @@ import {
   asrBackendForModel,
   asrBackendLabel,
   asrModelName,
-  inputGainName,
   isUnrecognizedTranscriptItem,
-  languageName,
   llmProviderLabel,
-  micDeviceLabel,
-  speakerModeName,
   transcriptParts,
   transcriptVersionOption,
 } from "@/lib/meeting-display";
@@ -80,8 +76,6 @@ function App() {
   const [finalizing, setFinalizing] = useState(false);
   const [pendingChunks, setPendingChunks] = useState(0);
   const [error, setError] = useState("");
-  const [asrLanguage, setAsrLanguage] = useState(DEFAULT_RECORDING_CONFIG.language);
-  const [lastAsr, setLastAsr] = useState(null);
   const [modelStatus, setModelStatus] = useState(null);
   const [modelCatalog, setModelCatalog] = useState(null);
   const [recordingAsrOptions, setRecordingAsrOptions] = useState([]);
@@ -108,7 +102,6 @@ function App() {
   const [micDevices, setMicDevices] = useState([]);
   const [selectedMicId, setSelectedMicId] = useState(loadSelectedMicId);
   const [selectedMicDraftId, setSelectedMicDraftId] = useState(loadSelectedMicId);
-  const [activeMicLabel, setActiveMicLabel] = useState("");
   const [vadLevel, setVadLevel] = useState(0);
   const [liveWaveformBars, setLiveWaveformBars] = useState([]);
   const [liveRecordingMs, setLiveRecordingMs] = useState(0);
@@ -352,7 +345,6 @@ function App() {
   useEffect(() => {
     const normalized = clampRecordingConfig(recordingConfig);
     recordingConfigRef.current = normalized;
-    setAsrLanguage(normalized.language);
   }, [recordingConfig]);
 
   useEffect(() => {
@@ -463,7 +455,6 @@ function App() {
       const nextConfig = recordingConfigFromServer(data.config);
       recordingConfigRef.current = nextConfig;
       setRecordingConfig(nextConfig);
-      setAsrLanguage(nextConfig.language);
       if (!settingsOpen) {
         setRecordingConfigDraft(nextConfig);
       }
@@ -697,13 +688,22 @@ function App() {
     if (!kind || !model) return;
     const meta = modelCatalogByKey.get(`${kind}:${model}`);
     const active = ["queued", "running", "cancelling"].includes(meta?.job?.status);
+    const loading = Boolean(meta?.loading);
+    const loaded = Boolean(meta?.loaded);
+    if (loading) {
+      setError("模型正在加载，请稍后再删除。");
+      return;
+    }
     const prompt = active
       ? `取消下载并删除已下载部分：${meta?.label || model}？`
+      : loaded
+        ? `模型正在使用：${meta?.label || model}。删除会先卸载它，之后录音或导入可能需要重新选择/重新加载模型。确定删除？`
       : `删除本地模型：${meta?.label || model}？`;
     if (!window.confirm(prompt)) return;
     setError("");
     try {
-      const catalog = await api(`/api/models/${encodeURIComponent(kind)}/${encodeURIComponent(model)}`, {
+      const force = loaded ? "?force=1" : "";
+      const catalog = await api(`/api/models/${encodeURIComponent(kind)}/${encodeURIComponent(model)}${force}`, {
         method: "DELETE",
       });
       setModelCatalog(catalog || null);
@@ -1386,7 +1386,6 @@ function App() {
           body: form,
           signal: controller.signal,
         });
-        setLastAsr(data.asr || null);
         if (data.runtime) setRuntimeStatus(data.runtime);
         setPipelineStatus("文字已更新");
         setMeeting((current) => {
@@ -1588,7 +1587,6 @@ function App() {
       setTitle(created.title || "今天的会议");
       meetingIdRef.current = created.id;
       stopRequestedRef.current = false;
-      setLastAsr(null);
       setLiveWaveformBars([]);
       setLiveRecordingMs(0);
       liveWaveformRef.current = [];
@@ -1619,8 +1617,6 @@ function App() {
         }
       }
       streamRef.current = stream;
-      const [audioTrack] = stream.getAudioTracks();
-      setActiveMicLabel(audioTrack?.label || "");
       await refreshMicDevices();
       const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
       if (!AudioContextCtor) {
@@ -1665,7 +1661,6 @@ function App() {
         streamRef.current.getTracks().forEach((track) => track.stop());
         streamRef.current = null;
       }
-      setActiveMicLabel("");
     } finally {
       setBusy(false);
     }
@@ -1779,7 +1774,6 @@ function App() {
       audioContextRef.current = null;
     }
     setRecording(false);
-    setActiveMicLabel("");
     setVadLevel(0);
     setPipelineStatus("已停止");
     setRuntimeStatus((current) => (
@@ -1878,7 +1872,6 @@ function App() {
           setTitle("今天的会议");
           setTitleSavedAt(0);
           setRuntimeStatus(null);
-          setLastAsr(null);
           setPipelineStatus("待机");
         }
         await refreshMeetings();
@@ -2231,21 +2224,7 @@ function App() {
   const recordingConfigDirty = !recordingConfigsEqual(recordingConfig, recordingConfigDraft)
     || selectedMicDraftId !== selectedMicId;
   const missingRecordingModels = missingModelsForConfig(recordingConfigDraft);
-  const maxSegmentSeconds = Math.round(normalizedRecordingConfig.maxSegmentMs / 1000);
-  const selectedMicDeviceIndex = micDevices.findIndex((device) => device.deviceId === selectedMicId);
-  const selectedMicLabel = selectedMicDeviceIndex >= 0
-    ? micDeviceLabel(micDevices[selectedMicDeviceIndex], selectedMicDeviceIndex)
-    : selectedMicId
-      ? "已选麦克风"
-      : "系统默认麦克风";
-  const currentMicLabel = activeMicLabel || selectedMicLabel;
-  const currentInputGainLabel = inputGainName(normalizedRecordingConfig.inputGain);
   const recordingAsrModelValue = normalizedRecordingConfigDraft.asrModel;
-  const currentRecordingSummary = [
-    selectedAsrModelMeta?.label || asrModelName(normalizedRecordingConfig.asrModel),
-    languageName(normalizedRecordingConfig.language),
-    speakerModeName(normalizedRecordingConfig.speakerMode),
-  ].join(" · ");
 
   const openRecordingSettings = useCallback(() => {
     setSettingsTab("recording");
@@ -2282,8 +2261,6 @@ function App() {
         editBusy={editBusy}
         onOpenRecordingSettings={openRecordingSettings}
         recording={recording}
-        currentRecordingSummary={currentRecordingSummary}
-        maxSegmentSeconds={maxSegmentSeconds}
         startReprocess={startReprocess}
         transcriptItems={transcriptItems}
         createEditableVersion={createEditableVersion}
@@ -2307,8 +2284,6 @@ function App() {
         runtimeStatus={displayRuntimeStatus}
         pendingChunks={pendingChunks}
         micLevel={micLevel}
-        currentMicLabel={currentMicLabel}
-        currentInputGainLabel={currentInputGainLabel}
         activePipelineStep={activePipelineStep}
         refreshMeetings={refreshMeetings}
         loadMeeting={loadMeeting}
@@ -2334,6 +2309,7 @@ function App() {
           activeModelDownload={activeModelDownload}
           activeModelDownloadMeta={activeModelDownloadMeta}
           recording={recording}
+          speakerMode={normalizedRecordingConfig.speakerMode}
           micLevel={micLevel}
           appearance={appearance}
           onToggleTheme={toggleAppearanceTheme}
@@ -2370,8 +2346,6 @@ function App() {
             activeVersionId={meeting?.active_version_id || "auto"}
             activateTranscriptVersion={activateTranscriptVersion}
             deleteTranscriptVersion={deleteTranscriptVersion}
-            lastAsr={lastAsr}
-            asrLanguage={asrLanguage}
             downloadTranscript={downloadTranscript}
             transcriptDownloading={downloadBusy === "transcript"}
             recording={recording}

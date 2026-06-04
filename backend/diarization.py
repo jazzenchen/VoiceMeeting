@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import gc
 import os
 import sys
 import warnings
@@ -205,6 +206,19 @@ class PyannoteDiarizer:
                 except Exception:
                     continue
         return turns
+
+    def unload(self) -> None:
+        self._pipeline = None
+        self.loaded = False
+        self.loading = False
+        gc.collect()
+        try:
+            import torch
+
+            if getattr(torch, "cuda", None) and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
 
 
 def _load_wav_for_pyannote(wav_path: Path) -> Dict[str, Any]:

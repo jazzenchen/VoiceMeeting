@@ -307,6 +307,7 @@ function RecordingSettingsPanel({
   const { t } = useI18n();
   const missingModelDownloads = missingRecordingModels.filter((item) => item.type !== "unavailable");
   const unavailableRecordingModels = missingRecordingModels.filter((item) => item.type === "unavailable");
+  const noAsrModels = selectableAsrModels.length === 0;
   const diarizationMeta = modelCatalogByKey.get("diarization:pyannote-community-1");
   return (
     <form className="settings-panel" onSubmit={saveRecordingConfig}>
@@ -314,7 +315,9 @@ function RecordingSettingsPanel({
         <div>
           <h3>{t("全局录制设置")}</h3>
           <p>
-            {unavailableRecordingModels.length
+            {noAsrModels
+              ? t("没有可用的语音识别模型，请先在模型文件里下载 ASR 模型。")
+              : unavailableRecordingModels.length
               ? t("当前设置有不可用的本地能力。")
               : missingModelDownloads.length
                 ? t("当前设置缺少本地模型。")
@@ -775,6 +778,7 @@ function ModelRow({ item, kind, metaLines, downloadModel, deleteModel }) {
   const { t } = useI18n();
   const active = ["queued", "running", "cancelling"].includes(item.job?.status);
   const loading = Boolean(item.loading);
+  const loaded = Boolean(item.loaded);
   const unavailable = item.installed && item.available === false;
 
   return (
@@ -785,6 +789,7 @@ function ModelRow({ item, kind, metaLines, downloadModel, deleteModel }) {
           <small key={line}>{line}</small>
         ))}
         {loading && <small>{t("正在加载识别模型")}</small>}
+        {loaded && <small>{t("模型正在使用")}</small>}
         {unavailable && <em>{item.unavailable_reason || t("运行环境未就绪")}</em>}
         {active && (
           <>
@@ -799,6 +804,8 @@ function ModelRow({ item, kind, metaLines, downloadModel, deleteModel }) {
       <div className="model-actions">
         {loading ? (
           <span className="model-badge working">{t("加载中")}</span>
+        ) : loaded ? (
+          <span className="model-badge ready"><Check size={12} />{t("使用中")}</span>
         ) : unavailable ? (
           <span className="model-badge blocked">{t("不可用")}</span>
         ) : item.installed ? (
@@ -817,7 +824,7 @@ function ModelRow({ item, kind, metaLines, downloadModel, deleteModel }) {
             <span>{t("下载")}</span>
           </button>
         )}
-        {item.installed && (
+        {item.installed && !loading && (
           <button
             className="mini-button"
             onClick={() => deleteModel(kind, item.name)}

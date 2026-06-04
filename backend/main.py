@@ -260,6 +260,8 @@ def model_catalog() -> Dict[str, Any]:
                     "token_available": model_downloads.hf_token_available(),
                     "enabled": pyannote_available,
                     "available": pyannote_available,
+                    "loaded": pyannote_local_runtime["loaded"] or bool(diarizer.loaded),
+                    "loading": pyannote_local_runtime["loading"] or bool(diarizer.loading),
                     "unavailable_reason": pyannote_unavailable_reason,
                     "dependency": pyannote_dependency,
                     "job": model_downloads.latest_job("diarization", PYANNOTE_COMMUNITY_MODEL_ID),
@@ -543,7 +545,7 @@ async def start_model_download(payload: ModelDownloadRequest) -> Dict[str, Any]:
 
 
 @app.delete("/api/models/{kind}/{model}")
-async def delete_model(kind: str, model: str) -> Dict[str, Any]:
+async def delete_model(kind: str, model: str, force: bool = False) -> Dict[str, Any]:
     clean_kind = clean_identifier(kind, "asr")
     clean_model = model.strip()
     running = model_downloads.active_job(clean_kind, clean_model)
@@ -555,12 +557,25 @@ async def delete_model(kind: str, model: str) -> Dict[str, Any]:
     if clean_kind == "asr":
         if clean_model not in SUPPORTED_ASR_MODELS:
             raise HTTPException(status_code=400, detail="当前识别模型不可用。")
-        if asr_runtime.is_loaded(clean_model):
-            detail = "当前识别模型已加载，请重启服务后再删除。" if clean_model == ASR_MODEL else "这个识别模型已加载，请重启服务后再删除。"
-            raise HTTPException(status_code=409, detail=detail)
+        runtime_flags = asr_runtime.model_runtime_flags(clean_model)
+        if runtime_flags["loading"]:
+            raise HTTPException(status_code=409, detail="识别模型正在加载，请稍后再删除。")
+        if runtime_flags["loaded"]:
+            if not force:
+                raise HTTPException(status_code=409, detail="识别模型正在使用，确认后才能删除。")
+            asr_runtime.unload_model(clean_model)
     elif clean_kind == "diarization" and clean_model == PYANNOTE_COMMUNITY_MODEL_ID:
-        if diarizer.loaded or bool(local_pyannote_diarizer and local_pyannote_diarizer.loaded):
-            raise HTTPException(status_code=409, detail="说话人分离模型已加载，请重启服务后再删除。")
+        diarization_loading = diarizer.loading or bool(local_pyannote_diarizer and local_pyannote_diarizer.loading)
+        diarization_loaded = diarizer.loaded or bool(local_pyannote_diarizer and local_pyannote_diarizer.loaded)
+        if diarization_loading:
+            raise HTTPException(status_code=409, detail="说话人分离模型正在加载，请稍后再删除。")
+        if diarization_loaded:
+            if not force:
+                raise HTTPException(status_code=409, detail="说话人分离模型正在使用，确认后才能删除。")
+            if diarizer.loaded:
+                diarizer.unload()
+            if local_pyannote_diarizer and local_pyannote_diarizer.loaded:
+                local_pyannote_diarizer.unload()
     else:
         raise HTTPException(status_code=400, detail="当前模型不可用。")
 
