@@ -63,6 +63,12 @@ import {
   recordingConfigsEqual,
 } from "@/lib/recording-config";
 
+const FIRST_SPEECH_FLUSH_MS = 5000;
+const MIN_FIRST_SPEECH_SEGMENT_MS = 1200;
+const PRE_SPEECH_BUFFER_MS = 500;
+const SPEECH_RMS_THRESHOLD = 0.006;
+const SPEECH_PEAK_THRESHOLD = 0.035;
+
 function App() {
   const [meeting, setMeeting] = useState(null);
   const [meetings, setMeetings] = useState([]);
@@ -145,6 +151,8 @@ function App() {
   const stopRequestedRef = useRef(false);
   const uploadChainRef = useRef(Promise.resolve());
   const activeUploadControllersRef = useRef(new Set());
+  const firstSpeechFlushDoneRef = useRef(false);
+  const preSpeechFramesRef = useRef([]);
   const meetingIdRef = useRef(null);
   const playbackContextRef = useRef(null);
   const playbackSourcesRef = useRef([]);
@@ -1474,18 +1482,39 @@ function App() {
         setLiveWaveformBars(compressWaveformBars(liveWaveformRef.current));
         setLiveRecordingMs(endMs);
       }
+      const noiseFloor = Math.max(0.0006, Number(liveWaveformFloorRef.current) || 0.002);
+      const speechDetected = level >= Math.max(SPEECH_RMS_THRESHOLD, noiseFloor * 3.2)
+        || peak >= SPEECH_PEAK_THRESHOLD;
       let segment = activeSegmentRef.current;
       if (!segment) {
+        preSpeechFramesRef.current.push({ frame, startMs, endMs });
+        preSpeechFramesRef.current = preSpeechFramesRef.current.filter(
+          (item) => endMs - item.endMs <= PRE_SPEECH_BUFFER_MS,
+        );
+        if (!speechDetected) return;
+        const buffered = preSpeechFramesRef.current;
+        const firstBuffered = buffered[0];
         activeSegmentRef.current = {
-          chunks: [],
-          startedAtMs: startMs,
+          chunks: buffered.map((item) => item.frame),
+          startedAtMs: firstBuffered?.startMs ?? startMs,
+          firstSpeechAtMs: startMs,
         };
+        preSpeechFramesRef.current = [];
         segment = activeSegmentRef.current;
+      } else {
+        segment.chunks.push(frame);
       }
 
-      segment.chunks.push(frame);
       const durationMs = endMs - segment.startedAtMs;
-      if (durationMs >= activeConfig.maxSegmentMs) {
+      const firstSpeechDurationMs = endMs - (segment.firstSpeechAtMs ?? segment.startedAtMs);
+      if (
+        !firstSpeechFlushDoneRef.current
+        && firstSpeechDurationMs >= FIRST_SPEECH_FLUSH_MS
+        && durationMs >= MIN_FIRST_SPEECH_SEGMENT_MS
+      ) {
+        firstSpeechFlushDoneRef.current = true;
+        closeActiveSegment("首段快速识别", endMs);
+      } else if (durationMs >= activeConfig.maxSegmentMs) {
         closeActiveSegment("定时上传", endMs);
       }
     },
@@ -1564,6 +1593,8 @@ function App() {
       activeSegmentRef.current = null;
       totalSamplesRef.current = 0;
       chunkSeqRef.current = 0;
+      firstSpeechFlushDoneRef.current = false;
+      preSpeechFramesRef.current = [];
 
       const audioContext = new AudioContextCtor();
       const source = audioContext.createMediaStreamSource(stream);
