@@ -45,6 +45,13 @@ function asrStatusText(modelStatus, recognitionUnavailableReason, t) {
   return model ? `${t("文字识别")} · ${model}` : "";
 }
 
+function releaseMouseFocus(event, action) {
+  action?.();
+  if (event.detail > 0) {
+    event.currentTarget.blur();
+  }
+}
+
 export function TopBar({
   meeting,
   transcriptCount,
@@ -143,7 +150,7 @@ export function TopBar({
           variant="ghost"
           size="sm"
           className="icon-btn language-btn"
-          onClick={onToggleLanguage}
+          onClick={(event) => releaseMouseFocus(event, onToggleLanguage)}
           title={locale === "zh" ? t("切换英文") : t("切换中文")}
         >
           <Languages size={14} />
@@ -154,7 +161,7 @@ export function TopBar({
           variant="ghost"
           size="icon"
           className="icon-btn"
-          onClick={onToggleTheme}
+          onClick={(event) => releaseMouseFocus(event, onToggleTheme)}
           title={appearance?.theme === "dark" ? t("切换浅色") : t("切换深色")}
         >
           {appearance?.theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
