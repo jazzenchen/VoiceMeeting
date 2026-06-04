@@ -1814,10 +1814,11 @@ function App() {
 
   const loadMeeting = useCallback(
     async (id) => {
+      if (recording && id !== meetingIdRef.current) return;
       meetingIdRef.current = id;
       await refreshMeeting(id);
     },
-    [refreshMeeting],
+    [recording, refreshMeeting],
   );
 
   useEffect(() => {
@@ -1929,6 +1930,11 @@ function App() {
     setPlaybackStatus(nextStatus);
   }, []);
 
+  useEffect(() => {
+    if (!recording) return;
+    stopPlayback("录制中不可回放").catch(() => {});
+  }, [recording, stopPlayback]);
+
   const decodePlaybackChunk = useCallback(async (context, chunk) => {
     const key = chunk?.id || chunk?.audio_url;
     if (!key || !chunk?.audio_url) {
@@ -1953,7 +1959,7 @@ function App() {
 
   const startPlaybackAt = useCallback(async (startAtMs = 0) => {
     const id = meetingIdRef.current || meeting?.id;
-    if (!id || playbackBusy) return;
+    if (!id || playbackBusy || recording) return;
     const targetMs = Math.max(0, Number(startAtMs) || 0);
     setPlaybackPreview({ meetingId: null, positionMs: null });
     await stopPlayback("切换回放", { clearCache: false });
@@ -2074,9 +2080,10 @@ function App() {
     } finally {
       setPlaybackBusy(false);
     }
-  }, [decodePlaybackChunk, meeting?.id, playbackBusy, stopPlayback]);
+  }, [decodePlaybackChunk, meeting?.id, playbackBusy, recording, stopPlayback]);
 
   const playMeeting = useCallback(async () => {
+    if (recording) return;
     const isCurrentPlaybackMeeting = Boolean(meeting?.id && playbackMeetingId === meeting.id);
     if (playing && isCurrentPlaybackMeeting) {
       await stopPlayback("已暂停", { preservePosition: true, preserveMeeting: true, clearCache: false });
@@ -2088,9 +2095,10 @@ function App() {
         ? playbackPreview.positionMs
         : 0;
     await startPlaybackAt(resumeMs);
-  }, [meeting?.id, playbackMeetingId, playbackPositionMs, playbackPreview, playing, startPlaybackAt, stopPlayback]);
+  }, [meeting?.id, playbackMeetingId, playbackPositionMs, playbackPreview, playing, recording, startPlaybackAt, stopPlayback]);
 
   const previewPlaybackAt = useCallback((startMs) => {
+    if (recording) return;
     const value = Number(startMs);
     if (!Number.isFinite(value)) return;
     const next = Math.max(0, value);
@@ -2099,16 +2107,17 @@ function App() {
     } else if (meeting?.id) {
       setPlaybackPreview({ meetingId: meeting.id, positionMs: next });
     }
-  }, [meeting?.id, playbackMeetingId]);
+  }, [meeting?.id, playbackMeetingId, recording]);
 
   const playFromTranscript = useCallback(
     async (event, startMs) => {
       event.stopPropagation();
+      if (recording) return;
       const value = Number(startMs);
       if (!Number.isFinite(value)) return;
       await startPlaybackAt(value);
     },
-    [startPlaybackAt],
+    [recording, startPlaybackAt],
   );
 
   const uploadAudioFile = useCallback(

@@ -201,6 +201,7 @@ export function Sidebar({
       <ul className="rail-list">
         {meetings.map((item) => {
           const isActive = item.id === meeting?.id;
+          const selectionLocked = recording && !isActive;
           const isPlaybackOwner = item.id === playbackMeetingId && (playbackPlaying || playbackBusy);
           const playProgress = playbackDurationMs > 0
             ? Math.max(0, Math.min(1, (Number(playbackPositionMs) || 0) / playbackDurationMs))
@@ -217,7 +218,13 @@ export function Sidebar({
               className={`rail-item ${isActive ? "active" : ""} ${isPlaybackOwner ? "playing" : ""}`}
               style={{ "--play-progress": `${playProgress * 100}%` }}
             >
-              <button className="rail-open" type="button" onClick={() => loadMeeting(item.id)}>
+              <button
+                className="rail-open"
+                type="button"
+                onClick={() => loadMeeting(item.id)}
+                disabled={selectionLocked}
+                title={selectionLocked ? t("录制中不能切换历史会议") : undefined}
+              >
                 <span className="title">{item.title}</span>
                 <span className="meta-line">
                   <span className="meta">{formatDateTime(item.created_at)}</span>
