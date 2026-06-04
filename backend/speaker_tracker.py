@@ -16,6 +16,7 @@ from .config import (
     SPEAKER_TRACKING_DEVICE,
     SPEAKER_TRACKING_ENABLED,
 )
+from .dependency_compat import ensure_pkg_resources_compat
 
 
 class SpeakerTrackingUnavailable(RuntimeError):
@@ -66,6 +67,7 @@ class SpeakerTracker:
         self.loading = True
         self.last_error = ""
         try:
+            ensure_pkg_resources_compat()
             from resemblyzer import VoiceEncoder
 
             self._encoder = VoiceEncoder(device=self.device)
@@ -190,6 +192,7 @@ class SpeakerTracker:
             return None
 
         try:
+            ensure_pkg_resources_compat()
             from resemblyzer import preprocess_wav
 
             encoder = self._load_encoder()

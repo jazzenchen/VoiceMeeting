@@ -155,6 +155,7 @@ class ChunkTranscriptionPipeline:
         }
         use_speaker_tracking = self.speaker_tracker.enabled and requested_speaker_mode in {
             "voiceprint",
+            "diarization",
             "auto",
         }
         if not use_speaker_tracking:

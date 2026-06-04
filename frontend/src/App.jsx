@@ -1396,6 +1396,7 @@ function App() {
             chunks: [...(current.chunks || []), data.chunk],
             segments: [...(current.segments || []), ...(data.segments || [])],
             utterances: data.utterances || current.utterances || [],
+            speakers: data.speakers || current.speakers || [],
           };
         });
       } catch (err) {
@@ -2298,7 +2299,6 @@ function App() {
         <TopBar
           meeting={meeting}
           transcriptCount={transcriptItems.length}
-          chunkCount={chunks.length}
           status={status}
           llmStatus={llmStatus}
           modelStatus={modelStatus}

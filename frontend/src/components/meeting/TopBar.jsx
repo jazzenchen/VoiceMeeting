@@ -47,7 +47,6 @@ function asrStatusText(modelStatus, t) {
 export function TopBar({
   meeting,
   transcriptCount,
-  chunkCount,
   status,
   llmStatus,
   modelStatus,
@@ -101,7 +100,7 @@ export function TopBar({
         <span className="crumb-dot">·</span>
         <span className="meeting-meta">{t("{count} 段", { count: transcriptCount })}</span>
         <span className="crumb-dot">·</span>
-        <span className="meeting-meta">{t("{count} 说话人", { count: speakerCount || chunkCount || 0 })}</span>
+        <span className="meeting-meta">{t("{count} 说话人", { count: speakerCount })}</span>
       </div>
 
       <div className="topbar-actions">

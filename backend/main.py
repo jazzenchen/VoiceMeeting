@@ -1397,6 +1397,7 @@ async def upload_chunk(
         "chunk": store.get_chunk(chunk["id"]),
         "segments": inserted_segments,
         "utterances": meeting.get("utterances") or [],
+        "speakers": meeting.get("speakers") or [],
         "summary": meeting["summary"],
         "runtime": meeting_runtime(meeting_id),
         "asr": {
@@ -1564,6 +1565,7 @@ async def reprocess_asr_version(
     unrecognized_total = 0
     assigned_total = 0
     created_total = 0
+    errors: list[str] = []
     try:
         asr_engine = asr_runtime.require_loaded_engine(model_name)
         meeting = store.get_meeting(meeting_id)
@@ -1614,14 +1616,15 @@ async def reprocess_asr_version(
                     elif not speaker_tracker.enabled:
                         result["segments"] = assign_speakers(result["segments"], turns)
                         assigned_total += len(result["segments"])
-                except DiarizationUnavailable:
-                    pass
+                except DiarizationUnavailable as exc:
+                    errors.append(str(exc))
 
             if speaker_mode == "off":
                 result["segments"] = clear_segment_speakers(result.get("segments") or [])
 
             use_speaker_tracking = speaker_tracker.enabled and speaker_mode in {
                 "voiceprint",
+                "diarization",
                 "auto",
             }
             if use_speaker_tracking:
@@ -1635,8 +1638,8 @@ async def reprocess_asr_version(
                     )
                     assigned_total += int(speaker_result.get("assigned") or 0)
                     created_total += int(speaker_result.get("created") or 0)
-                except SpeakerTrackingUnavailable:
-                    pass
+                except SpeakerTrackingUnavailable as exc:
+                    errors.append(str(exc))
 
             raw_segments = result.get("segments") or []
             if not [segment for segment in raw_segments if str(segment.get("text") or "").strip()]:
@@ -1671,6 +1674,7 @@ async def reprocess_asr_version(
             "unrecognized_segments": unrecognized_total,
             "assigned_segments": assigned_total,
             "created_speakers": created_total,
+            "errors": errors[:8],
         }
         store.update_transcript_version_status(meeting_id, version_id, "ready", settings)
         if make_current:
@@ -1764,6 +1768,7 @@ async def reprocess_speaker_version(
 
                 use_speaker_tracking = speaker_tracker.enabled and speaker_mode in {
                     "voiceprint",
+                    "diarization",
                     "auto",
                 }
                 if use_speaker_tracking:
@@ -1772,7 +1777,7 @@ async def reprocess_speaker_version(
                         store,
                         meeting_id,
                         wav_path,
-                        segments,
+                        assigned_segments,
                     )
                     assigned_total += int(speaker_result.get("assigned") or 0)
                     created_total += int(speaker_result.get("created") or 0)
