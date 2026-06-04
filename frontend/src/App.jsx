@@ -1685,7 +1685,7 @@ function App() {
   const runFinalize = useCallback(async (id, { allowWhileRecording = false } = {}) => {
     if (!id || finalizing) return;
     if (!llmReady) {
-      setError(llmUnavailableReason);
+      setFinalNotesError(llmUnavailableReason);
       setSettingsTab("llm");
       setSettingsOpen(true);
       return;
@@ -1695,7 +1695,6 @@ function App() {
       return;
     }
     setFinalizing(true);
-    setError("");
     setFinalNotesError("");
     setStreamingFinalMarkdown("");
     try {
@@ -1746,7 +1745,6 @@ function App() {
       setStreamingFinalMarkdown("");
       setPipelineStatus("生成失败");
       setFinalNotesError(message);
-      setError(message);
     } finally {
       setFinalizing(false);
     }
