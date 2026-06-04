@@ -53,6 +53,7 @@ const EN = {
   "重新校准说话人": "Recalibrate speakers",
   "重新分离说话人": "Re-separate speakers",
   "自动校对文字": "Auto proofread",
+  "自动校对文字中": "Proofreading",
   "整理段落": "Organize paragraphs",
   "按人声整理段落": "Organize by speech",
   "高级操作": "Advanced actions",

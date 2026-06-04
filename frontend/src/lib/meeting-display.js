@@ -251,6 +251,9 @@ function chunkStageLabel(statusValue) {
 export function runtimeLine(runtime, pendingChunks, t = (value, values) => value) {
   const reprocess = runtime?.reprocess;
   if (reprocess && ["queued", "running"].includes(reprocess.status)) {
+    if (String(reprocess.level || "") === "repair") {
+      return t("自动校对文字中");
+    }
     const total = Number(reprocess.total);
     const progress = Number(reprocess.progress);
     const stage = String(reprocess.stage || "处理中");
