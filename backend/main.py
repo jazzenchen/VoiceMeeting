@@ -898,7 +898,7 @@ async def start_reprocess_job(
         store.create_transcript_version(
             meeting_id=meeting_id,
             version_id=version_id,
-            label=f"说话人 {stamp}",
+            label=f"说话人分离 {stamp}",
             kind="speaker",
             settings={
                 "source_version_id": source_version_id,
@@ -994,7 +994,7 @@ async def start_reprocess_job(
             store.create_transcript_version(
                 meeting_id=meeting_id,
                 version_id=version_id,
-                label=f"重新合并 {stamp}",
+                label=f"人声整理 {stamp}",
                 kind="merge",
                 settings={"source_version_id": source_version_id},
                 parent_version_id=source_version_id,
@@ -1718,7 +1718,7 @@ async def reprocess_speaker_version(
         set_reprocess_state(
             job_id,
             status="running",
-            stage="说话人校准",
+            stage="说话人分离",
             progress=0,
             total=len(chunk_items),
         )
@@ -1726,7 +1726,7 @@ async def reprocess_speaker_version(
         for index, (chunk_id, chunk, segments) in enumerate(chunk_items, start=1):
             set_reprocess_state(
                 job_id,
-                stage=f"说话人校准 {index}/{len(chunk_items)}",
+                stage=f"说话人分离 {index}/{len(chunk_items)}",
                 progress=index - 1,
                 total=len(chunk_items),
                 chunk_id=chunk_id,

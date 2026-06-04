@@ -1077,9 +1077,9 @@ function App() {
         return;
       }
       const labels = {
-        asr: "重新识别",
-        speaker: "说话人校准",
-        merge: "整理段落",
+        asr: "重新识别文字",
+        speaker: "重新分离说话人",
+        merge: "按人声整理段落",
         repair: "自动校对文字",
         notes: "纪要重写",
       };
@@ -1342,9 +1342,9 @@ function App() {
       return;
     }
     const doneLabels = {
-      asr: "重新识别已完成",
-      speaker: "说话人校准已完成",
-      merge: "段落整理已完成",
+      asr: "重新识别文字已完成",
+      speaker: "说话人分离已完成",
+      merge: "按人声整理已完成",
       repair: "自动校对文字已完成",
       notes: "纪要已更新",
     };

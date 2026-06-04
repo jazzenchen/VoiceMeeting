@@ -187,19 +187,27 @@ export function TranscriptPane({
   const advancedActions = [
     {
       key: "asr",
-      label: t("重新识别"),
+      label: t("重新识别文字"),
       icon: <RefreshCcw size={15} />,
       disabled: !meeting || !recognitionReady || reprocessWorking,
-      title: recognitionUnavailableReason || t("重新识别"),
+      title: recognitionUnavailableReason || t("重新识别文字"),
       onSelect: () => startReprocess("asr"),
     },
     {
       key: "speaker",
-      label: t("重新校准说话人"),
+      label: t("重新分离说话人"),
       icon: <Users size={15} />,
       disabled: !meeting || reprocessWorking || !hasRecognizedTranscript,
-      title: t("重新校准说话人"),
+      title: t("重新分离说话人"),
       onSelect: () => startReprocess("speaker"),
+    },
+    {
+      key: "merge",
+      label: t("按人声整理段落"),
+      icon: <ListTree size={15} />,
+      disabled: !meeting || reprocessWorking || !hasRecognizedTranscript,
+      title: t("按人声整理段落"),
+      onSelect: () => startReprocess("merge"),
     },
     {
       key: "repair",
@@ -208,14 +216,6 @@ export function TranscriptPane({
       disabled: !meeting || reprocessWorking || !hasRecognizedTranscript,
       title: t("自动校对文字"),
       onSelect: () => startReprocess("repair"),
-    },
-    {
-      key: "merge",
-      label: t("整理段落"),
-      icon: <ListTree size={15} />,
-      disabled: !meeting || reprocessWorking || !hasRecognizedTranscript,
-      title: t("整理段落"),
-      onSelect: () => startReprocess("merge"),
     },
     {
       key: "editable",

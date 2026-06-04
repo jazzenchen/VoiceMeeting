@@ -126,8 +126,8 @@ export function transcriptVersionName(version, fallbackId = "auto") {
   const names = {
     initial: "原始稿",
     asr: "重新识别稿",
-    speaker: "说话人修正版",
-    merge: "段落整理稿",
+    speaker: "说话人分离稿",
+    merge: "人声整理稿",
     "llm-repair": "文字精修稿",
     "manual-edit": "手动修改稿",
     manual: "手动稿",
