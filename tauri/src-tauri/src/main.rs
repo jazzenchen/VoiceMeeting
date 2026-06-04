@@ -1,13 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use tauri::{Manager, RunEvent};
-use tauri_plugin_shell::process::{CommandChild, CommandEvent};
-use tauri_plugin_shell::ShellExt;
 
 const SERVER_PORT: u16 = 8788;
 const STARTUP_TIMEOUT_SECONDS: u64 = 120;
@@ -15,7 +13,6 @@ const REQUIRED_API_REVISION: u64 = 2;
 
 #[derive(Default)]
 struct ServerState {
-    child: Mutex<Option<CommandChild>>,
     pid: Mutex<Option<u32>>,
     status: Mutex<String>,
     error: Mutex<String>,
@@ -329,56 +326,83 @@ fn start_server(app: &tauri::AppHandle) -> Result<String, String> {
         return Err(message);
     }
 
-    let mut command = app.shell().command(
-        server_exe
-            .to_str()
-            .ok_or_else(|| "Invalid server executable path".to_string())?,
-    );
+    let mut command = Command::new(&server_exe);
     if let Some(server_dir) = server_exe.parent() {
-        command = command.current_dir(server_dir);
+        command.current_dir(server_dir);
     }
 
-    command = command.args(vec![
-        "--host".to_string(),
-        "127.0.0.1".to_string(),
-        "--port".to_string(),
-        port_str,
-        "--data-dir".to_string(),
-        data_dir_str,
-        "--models-dir".to_string(),
-        models_dir_str,
-        "--parent-pid".to_string(),
-        parent_pid_str,
-        "--allow-model-download".to_string(),
-    ]);
+    command
+        .args([
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port_str,
+            "--data-dir",
+            &data_dir_str,
+            "--models-dir",
+            &models_dir_str,
+            "--parent-pid",
+            &parent_pid_str,
+            "--allow-model-download",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
-    let (mut rx, child) = command.spawn().map_err(|error| {
+    let mut child = command.spawn().map_err(|error| {
         let message = format!("Failed to spawn VoiceMeeting server: {error}");
         set_server_status(&state, "error", &message);
         message
     })?;
-    let pid = child.pid();
+    let pid = child.id();
     *state.pid.lock().map_err(|error| error.to_string())? = Some(pid);
-    *state.child.lock().map_err(|error| error.to_string())? = Some(child);
 
-    let app_for_logs = app.clone();
-    tauri::async_runtime::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            match event {
-                CommandEvent::Stdout(line) => {
-                    let text = String::from_utf8_lossy(&line).to_string();
-                    println!("voice-meeting-server: {}", text);
-                    let state = app_for_logs.state::<ServerState>();
-                    push_server_log(&state, text);
-                }
-                CommandEvent::Stderr(line) => {
-                    let text = String::from_utf8_lossy(&line).to_string();
-                    eprintln!("voice-meeting-server: {}", text);
-                    let state = app_for_logs.state::<ServerState>();
-                    push_server_log(&state, text);
-                }
-                _ => {}
+    if let Some(stdout) = child.stdout.take() {
+        let app_for_logs = app.clone();
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                println!("voice-meeting-server: {}", line);
+                let state = app_for_logs.state::<ServerState>();
+                push_server_log(&state, line);
             }
+        });
+    }
+
+    if let Some(stderr) = child.stderr.take() {
+        let app_for_logs = app.clone();
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                eprintln!("voice-meeting-server: {}", line);
+                let state = app_for_logs.state::<ServerState>();
+                push_server_log(&state, line);
+            }
+        });
+    }
+
+    let app_for_exit = app.clone();
+    std::thread::spawn(move || {
+        let result = child.wait();
+        let state = app_for_exit.state::<ServerState>();
+        if let Ok(mut value) = state.pid.lock() {
+            if matches!(*value, Some(current) if current == pid) {
+                *value = None;
+            }
+        }
+        let status = state
+            .status
+            .lock()
+            .map(|value| value.clone())
+            .unwrap_or_default();
+        if status != "stopped" {
+            let message = match result {
+                Ok(exit) => format!("VoiceMeeting server exited: {exit}"),
+                Err(error) => format!("VoiceMeeting server wait failed: {error}"),
+            };
+            set_server_status(&state, "error", &message);
+            push_server_log(&state, message);
         }
     });
 
@@ -402,16 +426,13 @@ fn start_server(app: &tauri::AppHandle) -> Result<String, String> {
 
 fn stop_server(state: &ServerState) {
     let pid = state.pid.lock().ok().and_then(|mut pid| pid.take());
-    let _child = state.child.lock().ok().and_then(|mut child| child.take());
     set_server_status(state, "stopped", "");
 
     if let Some(pid) = pid {
         println!("Stopping VoiceMeeting server pid={}", pid);
         #[cfg(unix)]
         {
-            let _ = Command::new("kill")
-                .args(["-TERM", &pid.to_string()])
-                .output();
+            let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).output();
         }
         #[cfg(windows)]
         {

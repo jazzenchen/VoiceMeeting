@@ -103,7 +103,7 @@ from .vibearound import VibeAroundClient
 
 ensure_runtime_dirs()
 
-app = FastAPI(title="VoiceMeeting", version="0.0.1")
+app = FastAPI(title="VoiceMeeting", version="0.0.2")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -716,7 +716,7 @@ async def health() -> Dict[str, Any]:
     return {
         "ok": True,
         "app": "VoiceMeeting",
-        "version": "0.0.1",
+        "version": "0.0.2",
         "api_revision": 2,
         "features": ["models.load", "native-save", "i18n"],
         "project_dir": str(PROJECT_DIR),

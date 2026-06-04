@@ -1,5 +1,5 @@
 export const DEFAULT_LLM_CONFIG = {
-  provider: "vibearound",
+  provider: "litellm",
   litellm: {
     preset: "openai",
     api_base: "",
@@ -84,7 +84,7 @@ export function litellmPresetById(id) {
 export function normalizeLlmConfig(value) {
   const litellm = value?.litellm || {};
   return {
-    provider: value?.provider === "litellm" ? "litellm" : "vibearound",
+    provider: value?.provider === "vibearound" ? "vibearound" : "litellm",
     litellm: {
       preset: String(litellm.preset || "openai"),
       api_base: String(litellm.api_base || ""),

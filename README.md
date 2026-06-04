@@ -2,7 +2,7 @@
 
 VoiceMeeting turns long conversations into searchable transcripts and polished meeting notes, while keeping the speech recognition work on your own Mac. Record a meeting, import an audio file, review the timeline, clean up the transcript, and generate Markdown notes without sending raw audio to a cloud ASR service.
 
-> Version `0.0.1` is a macOS-first release. Windows and Linux are not packaged yet.
+> Version `0.0.2` is a macOS-first release. Windows and Linux are not packaged yet.
 
 ## Why VoiceMeeting
 
@@ -27,7 +27,7 @@ VoiceMeeting turns long conversations into searchable transcripts and polished m
 
 The first public build is macOS only:
 
-- Apple Silicon: `VoiceMeeting_0.0.1_aarch64.dmg`
+- Apple Silicon: `VoiceMeeting_0.0.2_aarch64.dmg`
 
 The app is signed and notarized for macOS distribution.
 
@@ -68,7 +68,7 @@ VoiceMeeting supports two note-generation routes:
 
 VoiceMeeting 是一个面向会议录音和音频转写的本地桌面应用：录音、导入音频、查看时间线、整理逐字稿、生成 Markdown 会议纪要，都在一个界面里完成。语音识别默认在本机运行，不需要把原始音频交给云端 ASR。
 
-> `0.0.1` 是 macOS 首发版本，暂时只提供 Mac 安装包。
+> `0.0.2` 是 macOS 首发版本，暂时只提供 Mac 安装包。
 
 ### 亮点
 

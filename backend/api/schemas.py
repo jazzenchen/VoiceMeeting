@@ -84,7 +84,7 @@ class LLMLiteLLMRequest(BaseModel):
 
 
 class LLMConfigRequest(BaseModel):
-    provider: str = "vibearound"
+    provider: str = "litellm"
     litellm: LLMLiteLLMRequest = Field(default_factory=LLMLiteLLMRequest)
 
 

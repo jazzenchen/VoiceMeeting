@@ -45,6 +45,14 @@ function asrStatusText(modelStatus, recognitionUnavailableReason, t) {
   return model ? `${t("文字识别")} · ${model}` : "";
 }
 
+function assistantPillClass(llmStatus, fallbackClass) {
+  const route = String(llmStatus?.route || llmStatus?.transport || llmStatus?.provider || "");
+  if ((llmStatus?.provider === "litellm" || route.includes("litellm")) && !llmStatus?.model) {
+    return "warning";
+  }
+  return fallbackClass || "unknown";
+}
+
 function releaseMouseFocus(event, action) {
   action?.();
   if (event.detail > 0) {
@@ -120,7 +128,7 @@ export function TopBar({
           <span className={`pill ${servicePillClass}`}>{t("本地服务")} · {t(serviceCompactText(status.backend))}</span>
           {asrPillText && <span className={`pill ${asrPillClass}`} title={asrPillText}>{asrPillText}</span>}
           <span className="pill ready">{speakerModeText}</span>
-          <span className={`pill ${status.vibe}`}>
+          <span className={`pill ${assistantPillClass(llmStatus, status.vibe)}`}>
             {compactStatusText(assistantStatusText(llmStatus)).replace(/^LLM 模型接口\s*·\s*/u, "LLM 模型接口 ")}
           </span>
           {asrWorking && <span className="pill working pulse-pill">{runtimeLine(runtimeStatus, pendingChunks, t)}</span>}

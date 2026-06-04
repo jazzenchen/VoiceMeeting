@@ -61,7 +61,7 @@ def friendly_llm_error(exc: BaseException) -> str:
 
 def _default_config() -> Dict[str, Any]:
     return {
-        "provider": LLM_PROVIDER_VIBEAROUND,
+        "provider": LLM_PROVIDER_LITELLM,
         "litellm": {
             "preset": "openai",
             "api_base": "",
