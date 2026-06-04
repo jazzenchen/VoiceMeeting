@@ -1792,12 +1792,19 @@ function App() {
     const stoppedMeetingId = meetingIdRef.current;
     if (stoppedMeetingId) {
       try {
-        await api(`/api/meetings/${stoppedMeetingId}/stop`, { method: "POST" });
-      } catch {
+        setPipelineStatus("保存最后音频");
+        await uploadChainRef.current;
+      } catch (err) {
+        setError(userFriendlyError(err.message));
+      }
+      try {
+        const stopped = await api(`/api/meetings/${stoppedMeetingId}/stop`, { method: "POST" });
+        setMeeting(stopped);
+      } catch (err) {
+        setError(userFriendlyError(err.message));
         // The local state still carries the recording outcome.
       }
       try {
-        await uploadChainRef.current;
         await refreshMeeting(stoppedMeetingId);
         await refreshMeetings();
       } catch (err) {
