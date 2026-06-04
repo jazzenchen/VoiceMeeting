@@ -44,6 +44,7 @@ from .diarization import (
     split_segments_by_turns,
 )
 from .llm import LLMManager
+from .meeting_audio import ensure_meeting_audio, meeting_audio_path
 from .model_registry import (
     ASR_MODEL_CATALOG,
     FUNASR_MODEL_CATALOG,
@@ -1172,6 +1173,35 @@ async def playback_manifest(meeting_id: str) -> Dict[str, Any]:
     except KeyError:
         raise HTTPException(status_code=404, detail="找不到这场会议，可能已经被删除。")
 
+    try:
+        audio = ensure_meeting_audio(meeting.get("chunks") or [], meeting_audio_path(meeting_id))
+    except Exception:
+        audio = None
+    if audio:
+        duration_ms = int(audio.get("duration_ms") or 0)
+        return {
+            "meeting_id": meeting_id,
+            "audio": {
+                "audio_url": f"/api/meetings/{meeting_id}/audio",
+                "duration_ms": duration_ms,
+                "chunk_count": audio.get("chunk_count") or 0,
+            },
+            "chunks": [
+                {
+                    "id": "meeting-audio",
+                    "seq": 0,
+                    "client_chunk_id": "",
+                    "started_at_ms": 0,
+                    "ended_at_ms": duration_ms,
+                    "duration_ms": duration_ms,
+                    "trim_start_ms": 0,
+                    "playable_duration_ms": duration_ms,
+                    "cut_reason": "完整会议音频",
+                    "audio_url": f"/api/meetings/{meeting_id}/audio",
+                }
+            ],
+        }
+
     chunks = []
     last_end_ms: Optional[int] = None
     sorted_chunks = sorted(
@@ -1227,6 +1257,19 @@ async def playback_manifest(meeting_id: str) -> Dict[str, Any]:
         )
 
     return {"meeting_id": meeting_id, "chunks": chunks}
+
+
+@app.get("/api/meetings/{meeting_id}/audio")
+async def meeting_audio(meeting_id: str) -> FileResponse:
+    try:
+        store.get_meeting(meeting_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="找不到这场会议，可能已经被删除。")
+
+    path = meeting_audio_path(meeting_id)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="完整会议音频还没有生成。")
+    return FileResponse(str(path), media_type="audio/wav", filename=path.name)
 
 
 @app.get("/api/meetings/{meeting_id}/chunks/{chunk_id}/audio")

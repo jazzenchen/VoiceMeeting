@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .config import CHUNKS_DIR, DB_PATH, ensure_runtime_dirs
+from .config import CHUNKS_DIR, DB_PATH, MEETINGS_DIR, ensure_runtime_dirs
 from .transcript import build_utterances, is_unrecognized_text
 
 
@@ -956,6 +956,7 @@ class MeetingStore:
             conn.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,))
 
         shutil.rmtree(CHUNKS_DIR / meeting_id, ignore_errors=True)
+        shutil.rmtree(MEETINGS_DIR / meeting_id, ignore_errors=True)
 
     def next_chunk_seq(self, meeting_id: str) -> int:
         with self._lock, self._connect() as conn:
