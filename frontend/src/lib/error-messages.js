@@ -1,3 +1,19 @@
+function cleanModelApiError(detail) {
+  const prefix = detail.startsWith("纪要生成失败：") ? "纪要生成失败：" : "";
+  const body = prefix ? detail.slice(prefix.length) : detail;
+  const statusMatch = body.match(/Error code:\s*(\d+)\s*-\s*([\s\S]+)$/);
+  if (statusMatch) {
+    const payload = statusMatch[2].trim();
+    const errorMatch = payload.match(/['"]error['"]\s*:\s*['"]([^'"]+)['"]/);
+    const message = errorMatch?.[1] || payload;
+    return `${prefix}模型接口返回 ${statusMatch[1]}：${message}`;
+  }
+  let cleaned = body.replace(/^(?:litellm\.)?[A-Za-z_]+(?:Error|Exception):\s*/, "");
+  cleaned = cleaned.replace(/^OpenAIException\s*-\s*/, "");
+  if (cleaned !== body) return `${prefix}${cleaned}`;
+  return "";
+}
+
 export function userFriendlyError(message) {
   const raw = String(message || "").trim();
   if (!raw) return "操作没有完成，请稍后重试。";
@@ -13,6 +29,8 @@ export function userFriendlyError(message) {
   } catch {
     // Keep the raw message.
   }
+
+  detail = cleanModelApiError(detail) || detail;
 
   const lower = detail.toLowerCase();
   if (lower.includes("meeting not found")) return "找不到这场会议，可能已经被删除。";

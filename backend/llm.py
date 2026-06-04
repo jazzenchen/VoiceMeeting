@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import json
+import re
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional
 
@@ -20,6 +22,41 @@ LLM_PROVIDER_LITELLM = "litellm"
 
 class LLMConfigError(ValueError):
     pass
+
+
+def _llm_error_payload_detail(value: str) -> str:
+    text = value.strip()
+    parsed: Any = None
+    for parser in (json.loads, ast.literal_eval):
+        try:
+            parsed = parser(text)
+            break
+        except Exception:
+            parsed = None
+    if isinstance(parsed, dict):
+        error = parsed.get("error") or parsed.get("message") or parsed.get("detail")
+        if isinstance(error, dict):
+            message = error.get("message") or error.get("detail") or error.get("code")
+            if message:
+                return str(message)
+        if error:
+            return str(error)
+    return text
+
+
+def friendly_llm_error(exc: BaseException) -> str:
+    raw = str(exc).strip() or exc.__class__.__name__
+    status_match = re.search(r"Error code:\s*(\d+)\s*-\s*(.+)$", raw, flags=re.DOTALL)
+    if status_match:
+        status = status_match.group(1)
+        detail = _llm_error_payload_detail(status_match.group(2))
+        return f"模型接口返回 {status}：{detail}"
+    if "OpenAIException -" in raw:
+        raw = raw.split("OpenAIException -", 1)[1].strip()
+    raw = re.sub(r"^(?:litellm\.)?[A-Za-z_]+(?:Error|Exception):\s*", "", raw)
+    if raw == "LLM Provider NOT provided.":
+        return "没有识别到模型接口类型，请检查模型接口设置。"
+    return raw
 
 
 def _default_config() -> Dict[str, Any]:
@@ -95,6 +132,8 @@ class LiteLLMClient:
             kwargs["api_key"] = self.api_key
         if self.api_base:
             kwargs["base_url"] = self.api_base
+            if "/" not in self.model:
+                kwargs["custom_llm_provider"] = "openai"
         return kwargs
 
     def _value(self, item: Any, key: str) -> Any:

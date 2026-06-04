@@ -5,6 +5,7 @@ import re
 from datetime import datetime
 from typing import Any, AsyncIterator, Dict, List, Optional
 
+from .llm import friendly_llm_error
 from .storage import DEFAULT_SUMMARY
 from .transcript import UNRECOGNIZED_TEXT, is_unrecognized_text
 from .vibearound import VibeAroundClient
@@ -565,11 +566,11 @@ class MeetingSummarizer:
             "guidance": meeting.get("description") or "",
             "transcript": transcript,
         }
+        messages = [
+            {"role": "system", "content": self.prompt_for_meeting("final_notes", FINAL_PROMPT, meeting)},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ]
         try:
-            messages = [
-                {"role": "system", "content": self.prompt_for_meeting("final_notes", FINAL_PROMPT, meeting)},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            ]
             markdown = await self.client.chat(messages, timeout=120.0)
             if final_markdown_looks_incomplete(markdown):
                 messages = [
@@ -579,9 +580,9 @@ class MeetingSummarizer:
                 markdown = await self.client.chat(messages, timeout=120.0)
             if markdown.strip() and not final_markdown_looks_incomplete(markdown):
                 return compose_final_markdown(meeting, markdown)
-        except Exception:
-            pass
-        return compose_final_markdown(meeting)
+        except Exception as exc:
+            raise RuntimeError(f"纪要生成失败：{friendly_llm_error(exc)}") from exc
+        raise RuntimeError("纪要生成失败：模型接口没有返回完整纪要。")
 
     async def finalize_stream(self, meeting: Dict[str, Any]) -> AsyncIterator[Dict[str, str]]:
         transcript = _transcript_for_prompt(meeting)
@@ -609,10 +610,10 @@ class MeetingSummarizer:
                 yield {"type": "chunk", "text": chunk}
             generated = "".join(generated_parts)
             if final_markdown_looks_incomplete(generated):
-                raise ValueError("final notes were incomplete")
+                raise RuntimeError("模型接口没有返回完整纪要。")
             markdown = compose_final_markdown(meeting, generated)
-        except Exception:
-            markdown = compose_final_markdown(meeting)
+        except Exception as exc:
+            raise RuntimeError(f"纪要生成失败：{friendly_llm_error(exc)}") from exc
 
         yield {"type": "replace", "markdown": markdown}
         yield {"type": "done", "markdown": markdown}

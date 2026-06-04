@@ -28,6 +28,7 @@ export function NotesPane({
   activeTranscriptVersion,
   finalMarkdownForDisplay,
   finalNotesStreaming,
+  finalNotesError,
   transcriptItems,
 }) {
   const { t } = useI18n();
@@ -76,6 +77,9 @@ export function NotesPane({
             <span>{t("完整纪要正在生成")}</span>
             <em aria-hidden="true"><b /><b /><b /></em>
           </div>
+        )}
+        {finalNotesError && (
+          <div className="error-line notes-error" role="alert">{finalNotesError}</div>
         )}
 
         {finalMarkdownText ? (

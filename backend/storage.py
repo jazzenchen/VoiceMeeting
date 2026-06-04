@@ -1226,6 +1226,7 @@ class MeetingStore:
 
     def clear_final_markdown(self, meeting_id: str) -> None:
         with self._lock, self._connect() as conn:
+            conn.execute("DELETE FROM final_notes WHERE meeting_id = ?", (meeting_id,))
             conn.execute(
                 """
                 UPDATE meetings

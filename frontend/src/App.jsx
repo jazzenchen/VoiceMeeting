@@ -74,6 +74,7 @@ function App() {
   const [recording, setRecording] = useState(false);
   const [busy, setBusy] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
+  const [finalNotesError, setFinalNotesError] = useState("");
   const [pendingChunks, setPendingChunks] = useState(0);
   const [error, setError] = useState("");
   const [modelStatus, setModelStatus] = useState(null);
@@ -396,6 +397,7 @@ function App() {
       setTitle(meeting.title || "");
       setTitleSavedAt(0);
     }
+    setFinalNotesError("");
   }, [meeting?.id]);
 
   useEffect(() => {
@@ -1694,6 +1696,7 @@ function App() {
     }
     setFinalizing(true);
     setError("");
+    setFinalNotesError("");
     setStreamingFinalMarkdown("");
     try {
       await uploadChainRef.current;
@@ -1726,6 +1729,9 @@ function App() {
             setMeeting(updated);
           }
         },
+        error: ({ error }) => {
+          throw new Error(error || "纪要生成失败。");
+        },
       });
       if (finalized) {
         setMeeting(finalized);
@@ -1736,8 +1742,11 @@ function App() {
       setPipelineStatus("完成");
       await refreshMeetings();
     } catch (err) {
+      const message = userFriendlyError(err.message);
+      setStreamingFinalMarkdown("");
       setPipelineStatus("生成失败");
-      setError(userFriendlyError(err.message));
+      setFinalNotesError(message);
+      setError(message);
     } finally {
       setFinalizing(false);
     }
@@ -2387,6 +2396,7 @@ function App() {
             finalMarkdownForDisplay={finalMarkdownForDisplay}
             finalNotesStreaming={finalNotesStreaming}
             finalNotesPending={finalNotesPending}
+            finalNotesError={finalNotesError}
             transcriptItems={transcriptItems}
           />
         </main>

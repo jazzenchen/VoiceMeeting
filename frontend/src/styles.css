@@ -4159,6 +4159,10 @@ a {
   padding: 0 24px 24px;
 }
 
+.app-shell .notes-error {
+  margin: 0 0 12px;
+}
+
 .app-shell .notes-markdown .markdown-preview {
   padding: 12px 14px;
   font-size: 12.5px;

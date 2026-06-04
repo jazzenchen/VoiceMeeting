@@ -1967,15 +1967,12 @@ async def reprocess_final_notes(meeting_id: str, job_id: str, force_local: bool)
         store.set_final_markdown(meeting_id, markdown, source)
         set_reprocess_state(job_id, status="done", stage="done", progress=1)
     except asyncio.TimeoutError:
-        meeting = store.get_meeting(meeting_id)
-        markdown = build_local_markdown(meeting)
-        store.set_final_markdown(meeting_id, markdown, transcript_source(meeting))
         set_reprocess_state(
             job_id,
             status="error",
             stage="timeout",
             progress=1,
-            error=f"Final notes timed out after {int(SUMMARY_TASK_TIMEOUT_SECONDS)} seconds; local notes were saved.",
+            error=f"Final notes timed out after {int(SUMMARY_TASK_TIMEOUT_SECONDS)} seconds.",
         )
     except Exception as exc:
         set_reprocess_state(job_id, status="error", stage="error", error=str(exc))
@@ -2063,22 +2060,15 @@ async def finalize_meeting_stream(meeting_id: str, payload: FinalizeRequest) -> 
                         if item.get("markdown"):
                             markdown = str(item["markdown"])
 
-            if not markdown.strip():
+            if not markdown.strip() and payload.force_local:
                 markdown = build_local_markdown(meeting)
                 yield sse_event("replace", {"markdown": markdown})
+            if not markdown.strip():
+                raise RuntimeError("纪要生成失败：模型接口没有返回内容。")
             store.set_final_markdown(meeting_id, markdown, source)
             yield sse_event("done", {"meeting": store.get_meeting(meeting_id)})
         except Exception as exc:
-            fallback = build_local_markdown(meeting)
-            store.set_final_markdown(meeting_id, fallback, source)
-            yield sse_event("replace", {"markdown": fallback})
-            yield sse_event(
-                "done",
-                {
-                    "meeting": store.get_meeting(meeting_id),
-                    "warning": str(exc),
-                },
-            )
+            yield sse_event("error", {"error": str(exc)})
 
     return StreamingResponse(
         event_stream(),
@@ -2107,7 +2097,9 @@ async def finalize_meeting(meeting_id: str, payload: FinalizeRequest) -> Dict[st
                 timeout=SUMMARY_TASK_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
-            markdown = build_local_markdown(meeting)
+            raise HTTPException(status_code=504, detail="纪要生成超时，请稍后重试。")
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc))
     store.set_final_markdown(meeting_id, markdown, source)
     return store.get_meeting(meeting_id)
 
