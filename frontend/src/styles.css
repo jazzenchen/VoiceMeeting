@@ -1770,8 +1770,47 @@ a {
 .confirm-actions {
   margin-top: 16px;
   display: flex;
+  align-items: center;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.settings-save-actions {
+  gap: 10px;
+}
+
+.settings-save-status {
+  min-height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  padding: 0 10px;
+  border: 1px solid #cdd7df;
+  background: #f7f9fb;
+  color: #687783;
+  font-size: 12px;
+  font-weight: 720;
+  white-space: nowrap;
+}
+
+.settings-save-status.saved {
+  color: #1f7a67;
+  border-color: rgba(31, 122, 103, 0.34);
+  background: rgba(31, 122, 103, 0.08);
+}
+
+.settings-save-status.dirty,
+.settings-save-status.blocked {
+  color: #7b5217;
+  border-color: rgba(123, 82, 23, 0.28);
+  background: rgba(123, 82, 23, 0.08);
+}
+
+.settings-save-status.error {
+  color: #8a2431;
+  border-color: rgba(138, 36, 49, 0.32);
+  background: rgba(138, 36, 49, 0.08);
 }
 
 .confirm-cancel,
@@ -2387,6 +2426,31 @@ a {
 
 .app-shell .save-state.dirty {
   color: var(--risk);
+}
+
+.app-shell .settings-save-status {
+  color: var(--fg-3);
+  border-color: var(--vm-border);
+  background: var(--surface-2);
+}
+
+.app-shell .settings-save-status.saved {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--vm-border));
+  background: color-mix(in srgb, var(--accent) 11%, var(--surface-2));
+}
+
+.app-shell .settings-save-status.dirty,
+.app-shell .settings-save-status.blocked {
+  color: var(--risk);
+  border-color: color-mix(in srgb, var(--risk) 32%, var(--vm-border));
+  background: color-mix(in srgb, var(--risk) 9%, var(--surface-2));
+}
+
+.app-shell .settings-save-status.error {
+  color: var(--risk);
+  border-color: color-mix(in srgb, var(--risk) 36%, var(--vm-border));
+  background: color-mix(in srgb, var(--risk) 11%, var(--surface-2));
 }
 
 .app-shell .title-input,

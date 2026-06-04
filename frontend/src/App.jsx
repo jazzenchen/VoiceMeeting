@@ -2231,6 +2231,17 @@ function App() {
   const normalizedRecordingConfigDraft = clampRecordingConfig(recordingConfigDraft);
   const recordingConfigDirty = !recordingConfigsEqual(recordingConfig, recordingConfigDraft)
     || selectedMicDraftId !== selectedMicId;
+  const savedLlmDraft = llmDraftFromConfig(llmConfig);
+  const llmConfigDirty = llmConfigDraft.provider !== savedLlmDraft.provider
+    || llmConfigDraft.preset !== savedLlmDraft.preset
+    || llmConfigDraft.apiBase !== savedLlmDraft.apiBase
+    || llmConfigDraft.model !== savedLlmDraft.model
+    || Boolean(String(llmConfigDraft.apiKey || "").trim());
+  const promptConfigDirty = useMemo(() => {
+    const savedDrafts = promptDraftsFromConfig(promptConfig);
+    const keys = new Set([...Object.keys(savedDrafts), ...Object.keys(promptDrafts)]);
+    return Array.from(keys).some((key) => String(promptDrafts[key] ?? "") !== String(savedDrafts[key] ?? ""));
+  }, [promptConfig, promptDrafts]);
   const missingRecordingModels = missingModelsForConfig(recordingConfigDraft);
   const recordingAsrModelValue = normalizedRecordingConfigDraft.asrModel;
 
@@ -2428,10 +2439,12 @@ function App() {
         llmConfig={llmConfig}
         llmConfigDraft={llmConfigDraft}
         updateLlmConfigDraft={updateLlmConfigDraft}
+        llmConfigDirty={llmConfigDirty}
         llmConfigError={llmConfigError}
         promptConfig={promptConfig}
         promptDrafts={promptDrafts}
         promptConfigSaving={promptConfigSaving}
+        promptConfigDirty={promptConfigDirty}
         promptConfigError={promptConfigError}
         updatePromptDraft={updatePromptDraft}
         resetPromptDraft={resetPromptDraft}

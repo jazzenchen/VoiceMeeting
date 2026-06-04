@@ -51,10 +51,12 @@ export function SettingsDialog({
   llmConfig,
   llmConfigDraft,
   updateLlmConfigDraft,
+  llmConfigDirty,
   llmConfigError,
   promptConfig,
   promptDrafts,
   promptConfigSaving,
+  promptConfigDirty,
   promptConfigError,
   updatePromptDraft,
   resetPromptDraft,
@@ -185,6 +187,7 @@ export function SettingsDialog({
                 llmConfigDraft={llmConfigDraft}
                 updateLlmConfigDraft={updateLlmConfigDraft}
                 llmConfigSaving={llmConfigSaving}
+                llmConfigDirty={llmConfigDirty}
                 llmConfigError={llmConfigError}
               />
             ) : settingsTab === "prompts" ? (
@@ -192,6 +195,7 @@ export function SettingsDialog({
                 promptConfig={promptConfig}
                 promptDrafts={promptDrafts}
                 promptConfigSaving={promptConfigSaving}
+                promptConfigDirty={promptConfigDirty}
                 promptConfigError={promptConfigError}
                 updatePromptDraft={updatePromptDraft}
                 resetPromptDraft={resetPromptDraft}
@@ -284,6 +288,30 @@ function AppearanceSettingsPanel({ appearance, updateAppearance }) {
   );
 }
 
+function SettingsSaveStatus({ saving, dirty, error, blockedLabel = "" }) {
+  const { t } = useI18n();
+  let state = "saved";
+  let label = t("已保存");
+  if (error) {
+    state = "error";
+    label = t("保存失败");
+  } else if (saving) {
+    state = "saving";
+    label = t("保存中");
+  } else if (blockedLabel) {
+    state = "blocked";
+    label = t(blockedLabel);
+  } else if (dirty) {
+    state = "dirty";
+    label = t("有未保存更改");
+  }
+  return (
+    <span className={`settings-save-status ${state}`} role="status" aria-live="polite">
+      {label}
+    </span>
+  );
+}
+
 function RecordingSettingsPanel({
   missingRecordingModels,
   selectedMicId,
@@ -324,17 +352,6 @@ function RecordingSettingsPanel({
                 : t("当前录制配置已就绪。")}
           </p>
         </div>
-        <span className={`save-state ${missingRecordingModels.length || recordingConfigDirty ? "dirty" : ""}`}>
-          {recordingConfigSaving
-            ? t("保存中")
-            : recordingConfigDirty
-              ? t("未保存")
-              : unavailableRecordingModels.length
-                ? t("需处理")
-                : missingModelDownloads.length
-                ? t("需下载")
-                : t("已保存")}
-        </span>
       </div>
 
       <div className="config-grid settings-config-grid">
@@ -461,7 +478,13 @@ function RecordingSettingsPanel({
         </div>
       )}
 
-      <div className="confirm-actions">
+      <div className="confirm-actions settings-save-actions">
+        <SettingsSaveStatus
+          saving={recordingConfigSaving}
+          dirty={recordingConfigDirty}
+          error={recordingConfigError}
+          blockedLabel={unavailableRecordingModels.length ? "需处理" : missingModelDownloads.length ? "需下载" : ""}
+        />
         <button
           type="submit"
           className="confirm-save"
@@ -482,6 +505,7 @@ function LlmSettingsPanel({
   llmConfigDraft,
   updateLlmConfigDraft,
   llmConfigSaving,
+  llmConfigDirty,
   llmConfigError,
 }) {
   const { t } = useI18n();
@@ -603,7 +627,12 @@ function LlmSettingsPanel({
 
       {llmConfigError && <div className="error-line llm-error">{llmConfigError}</div>}
 
-      <div className="confirm-actions">
+      <div className="confirm-actions settings-save-actions">
+        <SettingsSaveStatus
+          saving={llmConfigSaving}
+          dirty={llmConfigDirty}
+          error={llmConfigError || llmConfig.config_error}
+        />
         <button type="submit" className="confirm-save" disabled={llmConfigSaving}>
           <Check size={14} />
           <span>{llmConfigSaving ? t("保存中") : t("保存")}</span>
@@ -617,6 +646,7 @@ function PromptSettingsPanel({
   promptConfig,
   promptDrafts,
   promptConfigSaving,
+  promptConfigDirty,
   promptConfigError,
   updatePromptDraft,
   resetPromptDraft,
@@ -685,7 +715,12 @@ function PromptSettingsPanel({
         </div>
       )}
 
-      <div className="confirm-actions">
+      <div className="confirm-actions settings-save-actions">
+        <SettingsSaveStatus
+          saving={promptConfigSaving}
+          dirty={promptConfigDirty}
+          error={promptConfigError}
+        />
         <button type="submit" className="confirm-save" disabled={promptConfigSaving || prompts.length === 0}>
           <Check size={14} />
           <span>{promptConfigSaving ? t("保存中") : t("保存提示词")}</span>
