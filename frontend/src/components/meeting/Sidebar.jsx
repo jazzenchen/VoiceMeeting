@@ -9,7 +9,6 @@ import {
 
 import { Button } from "@/components/ui/button";
 import {
-  WAVE_PATTERN,
   formatOffset,
 } from "@/lib/meeting-display";
 import { useI18n } from "@/lib/i18n";
@@ -76,12 +75,12 @@ export function Sidebar({
   recognitionUnavailableReason,
   busy,
   importingAudio,
+  finalizing,
   startMeeting,
   stopRecording,
   uploadAudioFile,
   runtimeStatus,
   pendingChunks,
-  micLevel,
   refreshMeetings,
   loadMeeting,
   playbackMeetingId,
@@ -94,6 +93,7 @@ export function Sidebar({
   const reprocess = runtimeStatus?.reprocess;
   const reprocessActive = Boolean(reprocess && ["queued", "running"].includes(reprocess.status));
   const processing = pendingChunks > 0 || Boolean(runtimeStatus?.active_chunks?.length) || reprocessActive;
+  const interactionLocked = recording || busy || importingAudio || finalizing || processing;
   const recordingUnavailable = !serviceReady
     ? t("本地语音服务还在启动中，请稍候。")
     : !recognitionReady
@@ -130,14 +130,14 @@ export function Sidebar({
               type="button"
               className="new-rec-btn"
               onClick={startMeeting}
-              disabled={!serviceReady || !recognitionReady || busy || importingAudio || processing}
+              disabled={!serviceReady || !recognitionReady || interactionLocked}
               title={recordingUnavailable || t("新建录音")}
             >
               <Mic size={15} />
               <span>{busy ? t("启动中") : t("新建录音")}</span>
             </Button>
             <label
-              className={`import-btn ${serviceReady && recognitionReady && !busy && !importingAudio && !processing ? "" : "disabled"}`}
+              className={`import-btn ${serviceReady && recognitionReady && !interactionLocked ? "" : "disabled"}`}
               title={recordingUnavailable || t("导入音频文件")}
             >
               <FileAudio size={13} />
@@ -146,7 +146,7 @@ export function Sidebar({
                 type="file"
                 accept="audio/*,video/*"
                 onChange={uploadAudioFile}
-                disabled={!serviceReady || !recognitionReady || busy || importingAudio || processing}
+                disabled={!serviceReady || !recognitionReady || interactionLocked}
               />
             </label>
             {recordingUnavailable && serviceReady && !processing && !importingAudio && (
@@ -159,20 +159,15 @@ export function Sidebar({
         )}
       </div>
 
-      {recording && (
-        <div className="rail-meter" aria-label={t("麦克风电平")}>
-          {WAVE_PATTERN.map((weight, index) => (
-            <span
-              key={`rail-meter-${index}`}
-              style={{ "--bar": Math.max(0.08, weight * micLevel) }}
-            />
-          ))}
-        </div>
-      )}
-
       <div className="rail-section">
         <span>{t("历史会议 · {count}", { count: meetings.length })}</span>
-        <button className="rail-search" type="button" title={t("刷新会议列表")} onClick={refreshMeetings}>
+        <button
+          className="rail-search"
+          type="button"
+          title={interactionLocked ? t("处理中，暂时不能操作会议列表") : t("刷新会议列表")}
+          onClick={refreshMeetings}
+          disabled={interactionLocked}
+        >
           <RefreshCcw size={13} />
         </button>
       </div>
@@ -180,7 +175,6 @@ export function Sidebar({
       <ul className="rail-list">
         {meetings.map((item) => {
           const isActive = item.id === meeting?.id;
-          const selectionLocked = recording && !isActive;
           const isPlaybackOwner = item.id === playbackMeetingId && (playbackPlaying || playbackBusy);
           const playProgress = playbackDurationMs > 0
             ? Math.max(0, Math.min(1, (Number(playbackPositionMs) || 0) / playbackDurationMs))
@@ -201,8 +195,8 @@ export function Sidebar({
                 className="rail-open"
                 type="button"
                 onClick={() => loadMeeting(item.id)}
-                disabled={selectionLocked}
-                title={selectionLocked ? t("录制中不能切换历史会议") : undefined}
+                disabled={interactionLocked}
+                title={interactionLocked ? t("处理中，暂时不能切换会议") : undefined}
               >
                 <span className="title">{item.title}</span>
                 <span className="meta-line">

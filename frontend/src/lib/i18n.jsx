@@ -40,6 +40,8 @@ const EN = {
   "正在处理": "Processing",
   "历史会议 · {count}": "History · {count}",
   "刷新会议列表": "Refresh meetings",
+  "处理中，暂时不能操作会议列表": "Processing. Meeting list actions are temporarily disabled.",
+  "处理中，暂时不能切换会议": "Processing. Switching meetings is temporarily disabled.",
   "加载回放": "Loading playback",
   "播放中 · {position} / {duration}": "Playing · {position} / {duration}",
   "本地会议": "Local meeting",

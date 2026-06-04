@@ -2315,7 +2315,6 @@ function App() {
         uploadAudioFile={uploadAudioFile}
         runtimeStatus={displayRuntimeStatus}
         pendingChunks={pendingChunks}
-        micLevel={micLevel}
         refreshMeetings={refreshMeetings}
         loadMeeting={loadMeeting}
         playbackMeetingId={playbackMeetingId}

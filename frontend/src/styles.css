@@ -3790,22 +3790,6 @@ a {
   color: var(--fg-4);
 }
 
-.rail-meter {
-  height: 24px;
-  margin: -10px 12px 12px;
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-
-.rail-meter span {
-  width: 3px;
-  height: calc(5px + var(--bar) * 18px);
-  border-radius: 2px;
-  background: var(--accent);
-  opacity: 0.65;
-}
-
 .proc-mini {
   min-height: 38px;
   padding: 10px 12px;
