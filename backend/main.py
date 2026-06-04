@@ -214,25 +214,8 @@ def model_catalog() -> Dict[str, Any]:
                 }
         )
 
-    pyannote_path = local_pyannote_model_path()
-    pyannote_installed = pyannote_path is not None
-    pyannote_dependency = pyannote_audio_status()
-    pyannote_available = pyannote_installed and bool(pyannote_dependency.get("available"))
-    pyannote_unavailable_reason = ""
-    if pyannote_installed and not pyannote_available:
-        pyannote_unavailable_reason = str(pyannote_dependency.get("reason") or "高精度分离运行环境未就绪。")
-    pyannote_local_runtime = {
-        "backend": "pyannote",
-        "model": str(PYANNOTE_MODEL_DIR),
-        "device": diarizer.device,
-        "enabled": pyannote_available,
-        "loaded": bool(local_pyannote_diarizer and local_pyannote_diarizer.loaded),
-        "loading": bool(local_pyannote_diarizer and local_pyannote_diarizer.loading),
-        "available": pyannote_available,
-        "reason": pyannote_unavailable_reason,
-        "last_error": str(local_pyannote_diarizer.last_error) if local_pyannote_diarizer else "",
-        "dependency": pyannote_dependency,
-    }
+    pyannote_options = diarization_model_options(include_details=True)
+    pyannote_local_runtime = pyannote_runtime_status(pyannote_options[0])
     return {
         "asr": {
             "model_dir": str(ASR_MODEL_DIR),
@@ -242,36 +225,68 @@ def model_catalog() -> Dict[str, Any]:
         },
         "diarization": {
             "model_dir": str(MODELS_DIR / "pyannote"),
-            "models": [
-                {
-                    "kind": "diarization",
-                    "id": PYANNOTE_COMMUNITY_MODEL_ID,
-                    "name": PYANNOTE_COMMUNITY_MODEL_ID,
-                    "repo_id": PYANNOTE_COMMUNITY_REPO_ID,
-                    "label": "Pyannote Community-1",
-                    "params": "pipeline（多模型组合）",
-                    "disk": "约 32MB",
-                    "file_breakdown": "embedding约 25MB + segmentation约 6MB + PLDA",
-                    "components": "segmentation + embedding + PLDA",
-                    "profile": "高精度说话人分离",
-                    "installed": pyannote_installed,
-                    "path": str(PYANNOTE_MODEL_DIR),
-                    "size_bytes": directory_size_bytes(PYANNOTE_MODEL_DIR) if pyannote_installed else 0,
-                    "requires_token": True,
-                    "token_available": model_downloads.hf_token_available(),
-                    "enabled": pyannote_available,
-                    "available": pyannote_available,
-                    "loaded": pyannote_local_runtime["loaded"] or bool(diarizer.loaded),
-                    "loading": pyannote_local_runtime["loading"] or bool(diarizer.loading),
-                    "unavailable_reason": pyannote_unavailable_reason,
-                    "dependency": pyannote_dependency,
-                    "job": model_downloads.latest_job("diarization", PYANNOTE_COMMUNITY_MODEL_ID),
-                }
-            ],
+            "models": pyannote_options,
             "runtime": diarizer.status(),
             "local_runtime": pyannote_local_runtime,
         },
         "downloads": model_downloads.recent_states(),
+    }
+
+
+def diarization_model_options(include_details: bool = False) -> list[Dict[str, Any]]:
+    pyannote_path = local_pyannote_model_path()
+    pyannote_installed = pyannote_path is not None
+    pyannote_dependency = pyannote_audio_status()
+    pyannote_available = pyannote_installed and bool(pyannote_dependency.get("available"))
+    pyannote_unavailable_reason = ""
+    if pyannote_installed and not pyannote_available:
+        pyannote_unavailable_reason = str(pyannote_dependency.get("reason") or "高精度分离运行环境未就绪。")
+    local_loaded = bool(local_pyannote_diarizer and local_pyannote_diarizer.loaded)
+    local_loading = bool(local_pyannote_diarizer and local_pyannote_diarizer.loading)
+    option: Dict[str, Any] = {
+        "kind": "diarization",
+        "id": PYANNOTE_COMMUNITY_MODEL_ID,
+        "name": PYANNOTE_COMMUNITY_MODEL_ID,
+        "repo_id": PYANNOTE_COMMUNITY_REPO_ID,
+        "label": "Pyannote Community-1",
+        "installed": pyannote_installed,
+        "requires_token": True,
+        "token_available": model_downloads.hf_token_available(),
+        "enabled": pyannote_available,
+        "available": pyannote_available,
+        "loaded": local_loaded or bool(diarizer.loaded),
+        "loading": local_loading or bool(diarizer.loading),
+        "unavailable_reason": pyannote_unavailable_reason,
+        "dependency": pyannote_dependency,
+        "job": model_downloads.latest_job("diarization", PYANNOTE_COMMUNITY_MODEL_ID),
+    }
+    if include_details:
+        option.update(
+            {
+                "params": "pipeline（多模型组合）",
+                "disk": "约 32MB",
+                "file_breakdown": "embedding约 25MB + segmentation约 6MB + PLDA",
+                "components": "segmentation + embedding + PLDA",
+                "profile": "高精度说话人分离",
+                "path": str(PYANNOTE_MODEL_DIR),
+                "size_bytes": directory_size_bytes(PYANNOTE_MODEL_DIR) if pyannote_installed else 0,
+            }
+        )
+    return [option]
+
+
+def pyannote_runtime_status(model_option: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "backend": "pyannote",
+        "model": str(PYANNOTE_MODEL_DIR),
+        "device": diarizer.device,
+        "enabled": bool(model_option.get("enabled")),
+        "loaded": bool(local_pyannote_diarizer and local_pyannote_diarizer.loaded),
+        "loading": bool(local_pyannote_diarizer and local_pyannote_diarizer.loading),
+        "available": bool(model_option.get("available")),
+        "reason": str(model_option.get("unavailable_reason") or ""),
+        "last_error": str(local_pyannote_diarizer.last_error) if local_pyannote_diarizer else "",
+        "dependency": model_option.get("dependency") or {},
     }
 
 
@@ -1567,6 +1582,7 @@ def recording_config_response() -> Dict[str, Any]:
         "configured_model_loaded": configured_asr_loaded(config["asr_model"]),
         "load_error": recording_model_load_error,
         "asr_options": asr_model_options(),
+        "diarization_options": diarization_model_options(),
     }
 
 

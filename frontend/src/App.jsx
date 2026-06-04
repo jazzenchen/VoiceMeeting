@@ -79,6 +79,7 @@ function App() {
   const [modelStatus, setModelStatus] = useState(null);
   const [modelCatalog, setModelCatalog] = useState(null);
   const [recordingAsrOptions, setRecordingAsrOptions] = useState([]);
+  const [recordingDiarizationOptions, setRecordingDiarizationOptions] = useState([]);
   const [recordingConfig, setRecordingConfig] = useState(loadRecordingConfig);
   const [recordingConfigDraft, setRecordingConfigDraft] = useState(loadRecordingConfig);
   const [recordingConfigSaving, setRecordingConfigSaving] = useState(false);
@@ -243,10 +244,32 @@ function App() {
       .map((item) => item.name || item.id);
     return ASR_MODEL_ORDER.filter((name) => installedNames.includes(name));
   }, [recordingAsrMetaByName]);
+  const recordingDiarizationMetaByName = useMemo(() => {
+    const map = new Map();
+    for (const item of recordingDiarizationOptions || []) {
+      const name = item.name || item.id;
+      if (!name) continue;
+      map.set(name, {
+        ...item,
+        kind: "diarization",
+        id: item.id || name,
+        name,
+        label: item.label || name,
+        installed: Boolean(item.installed),
+        available: item.available === undefined ? Boolean(item.installed) : Boolean(item.available),
+        loaded: Boolean(item.loaded),
+        loading: Boolean(item.loading),
+      });
+    }
+    return map;
+  }, [recordingDiarizationOptions]);
   const modelCatalogByKey = useMemo(() => {
     const map = new Map();
     for (const item of recordingAsrMetaByName.values()) {
       map.set(`asr:${item.name || item.id}`, item);
+    }
+    for (const item of recordingDiarizationMetaByName.values()) {
+      map.set(`diarization:${item.name || item.id}`, item);
     }
     for (const item of modelCatalogAsr) {
       map.set(`asr:${item.name || item.id}`, item);
@@ -255,7 +278,7 @@ function App() {
       map.set(`diarization:${item.name || item.id}`, item);
     }
     return map;
-  }, [modelCatalog?.diarization?.models, modelCatalogAsr, recordingAsrMetaByName]);
+  }, [modelCatalog?.diarization?.models, modelCatalogAsr, recordingAsrMetaByName, recordingDiarizationMetaByName]);
   const modelMetaForRequirement = useCallback(
     (item, catalog = modelCatalog) => {
       if (!item?.kind || !item?.model) return null;
@@ -265,11 +288,13 @@ function App() {
           || null;
       }
       if (item.kind === "diarization") {
-        return (catalog?.diarization?.models || []).find((meta) => (meta.name || meta.id) === item.model) || null;
+        return recordingDiarizationMetaByName.get(item.model)
+          || (catalog?.diarization?.models || []).find((meta) => (meta.name || meta.id) === item.model)
+          || null;
       }
       return null;
     },
-    [modelCatalog, recordingAsrMetaByName],
+    [modelCatalog, recordingAsrMetaByName, recordingDiarizationMetaByName],
   );
   const asrModelGroups = useMemo(() => {
     const groups = [];
@@ -475,6 +500,7 @@ function App() {
       }
     }
     if (Array.isArray(data.asr_options)) setRecordingAsrOptions(data.asr_options);
+    if (Array.isArray(data.diarization_options)) setRecordingDiarizationOptions(data.diarization_options);
     setModelStatus(data.asr || null);
     if (data.llm) {
       applyLlmStatus(data.llm);
@@ -909,35 +935,48 @@ function App() {
     return required;
   }, []);
 
-  const missingModelsForConfig = useCallback((config, catalog = modelCatalog) => (
-    (catalog || recordingAsrMetaByName.size > 0)
-      ? requiredModelsForConfig(config).map((item) => {
-        const meta = modelMetaForRequirement(item, catalog);
-        const label = meta?.label || item.model;
-        if (!meta) {
-          if (item.kind !== "asr" && !catalog) return null;
-          return { ...item, type: "missing", label };
-        }
-        if (!meta.installed) {
-          return { ...item, type: "missing", label };
-        }
-        if (item.kind === "diarization" && meta.available === false) {
-          return {
-            ...item,
-            type: "unavailable",
-            label,
-            reason: meta.unavailable_reason || "高精度分离运行环境未就绪。",
-          };
-        }
-        return null;
-      }).filter(Boolean)
-      : []
-  ), [modelCatalog, modelMetaForRequirement, recordingAsrMetaByName.size, requiredModelsForConfig]);
+  const missingModelsForConfig = useCallback((config, catalog = modelCatalog) => {
+    if (!catalog && recordingAsrMetaByName.size === 0 && recordingDiarizationMetaByName.size === 0) return [];
+    return requiredModelsForConfig(config).map((item) => {
+      const meta = modelMetaForRequirement(item, catalog);
+      const label = meta?.label || item.model;
+      if (!meta) {
+        const canEvaluateKind = item.kind === "asr"
+          ? Boolean(catalog) || recordingAsrMetaByName.size > 0
+          : item.kind === "diarization"
+            ? Boolean(catalog) || recordingDiarizationMetaByName.size > 0
+            : Boolean(catalog);
+        if (!canEvaluateKind) return null;
+        return { ...item, type: "missing", label };
+      }
+      if (!meta.installed) {
+        return { ...item, type: "missing", label };
+      }
+      if (item.kind === "diarization" && meta.available === false) {
+        return {
+          ...item,
+          type: "unavailable",
+          label,
+          reason: meta.unavailable_reason || "高精度分离运行环境未就绪。",
+        };
+      }
+      return null;
+    }).filter(Boolean);
+  }, [
+    modelCatalog,
+    modelMetaForRequirement,
+    recordingAsrMetaByName.size,
+    recordingDiarizationMetaByName.size,
+    requiredModelsForConfig,
+  ]);
 
   const ensureRecordingModels = useCallback(async (config = recordingConfigRef.current) => {
     const requiredModels = requiredModelsForConfig(config);
     let catalog = modelCatalog;
-    if (!catalog && requiredModels.some((item) => item.kind !== "asr")) {
+    const needsCatalog = !catalog && requiredModels.some((item) => (
+      item.kind !== "asr" && !modelMetaForRequirement(item, catalog)
+    ));
+    if (needsCatalog) {
       try {
         catalog = await api("/api/models");
         setModelCatalog(catalog);
