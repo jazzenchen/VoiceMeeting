@@ -160,6 +160,7 @@ const EN = {
   "请先处理不可用项": "Resolve unavailable items first",
   "语言": "Language",
   "上传间隔": "Upload interval",
+  "最长语音窗口": "Max speech window",
   "人声增益": "Voice gain",
   "当前设置缺少本地模型。": "Local models are missing for the current settings.",
   "识别模型未安装": "Speech model is not installed",

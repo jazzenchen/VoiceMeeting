@@ -408,7 +408,7 @@ function RecordingSettingsPanel({
           </select>
         </label>
         <label>
-          <span>{t("上传间隔")}</span>
+          <span>{t("最长语音窗口")}</span>
           <select
             className="select-input compact-select"
             value={recordingConfig.maxSegmentMs}

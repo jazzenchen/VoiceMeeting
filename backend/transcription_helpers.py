@@ -99,7 +99,12 @@ def unrecognized_segment_for_chunk(chunk: Dict[str, Any]) -> Dict[str, Any]:
 
 def segments_or_unrecognized(chunk: Dict[str, Any], segments: Optional[list[Dict[str, Any]]]) -> list[Dict[str, Any]]:
     recognized = [segment for segment in (segments or []) if str(segment.get("text") or "").strip()]
-    return recognized if recognized else [unrecognized_segment_for_chunk(chunk)]
+    if recognized:
+        return recognized
+    cut_reason = str(chunk.get("cut_reason") or "")
+    if "探测" in cut_reason:
+        return []
+    return [unrecognized_segment_for_chunk(chunk)]
 
 
 def asr_context_prompt(

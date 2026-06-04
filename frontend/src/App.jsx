@@ -43,14 +43,20 @@ import { loadSelectedMicId, saveSelectedMicId } from "@/lib/mic-preferences";
 import { requestNativeMicrophonePermission, safeDownloadName, saveTextFile } from "@/lib/platform-files";
 import {
   LIVE_WAVEFORM_BAR_COUNT,
+  FIRST_SPEECH_FLUSH_MS,
+  MIN_SPEECH_WINDOW_MS,
+  PRE_SPEECH_BUFFER_MS,
+  PRE_SPEECH_PROBE_MS,
+  SPEECH_END_SILENCE_MS,
   applyInputGain,
   audioBufferToMono,
   compressWaveformBars,
   concatFloat32,
   displayMicLevel,
   encodeWav,
-  makeFixedChunks,
+  makeVadChunks,
   shapeLiveWaveLevel,
+  speechDetectedByEnergy,
 } from "@/lib/audio-processing";
 import {
   ASR_MODEL_ORDER,
@@ -62,12 +68,6 @@ import {
   recordingConfigToServer,
   recordingConfigsEqual,
 } from "@/lib/recording-config";
-
-const FIRST_SPEECH_FLUSH_MS = 5000;
-const MIN_FIRST_SPEECH_SEGMENT_MS = 1200;
-const PRE_SPEECH_BUFFER_MS = 500;
-const SPEECH_RMS_THRESHOLD = 0.006;
-const SPEECH_PEAK_THRESHOLD = 0.035;
 
 function App() {
   const [meeting, setMeeting] = useState(null);
@@ -153,6 +153,7 @@ function App() {
   const activeUploadControllersRef = useRef(new Set());
   const firstSpeechFlushDoneRef = useRef(false);
   const preSpeechFramesRef = useRef([]);
+  const preSpeechProbeRef = useRef(null);
   const meetingIdRef = useRef(null);
   const playbackContextRef = useRef(null);
   const playbackSourcesRef = useRef([]);
@@ -1423,17 +1424,14 @@ function App() {
     [uploadChunk],
   );
 
-  const closeActiveSegment = useCallback(
-    (reason, endedAtMs) => {
-      const segment = activeSegmentRef.current;
-      if (!segment) return;
-      activeSegmentRef.current = null;
-      const durationMs = Math.max(0, endedAtMs - segment.startedAtMs);
+  const enqueueAudioWindow = useCallback(
+    (chunks, startedAtMs, endedAtMs, reason) => {
+      const durationMs = Math.max(0, endedAtMs - startedAtMs);
       if (durationMs < 300) {
         setPipelineStatus("录音中");
         return;
       }
-      const samples = concatFloat32(segment.chunks);
+      const samples = concatFloat32(chunks);
       if (samples.length === 0) {
         setPipelineStatus("录音中");
         return;
@@ -1443,13 +1441,33 @@ function App() {
       const blob = encodeWav(samples, audioSampleRateRef.current);
       enqueueChunk(blob, durationMs, {
         clientChunkId,
-        startedAtMs: segment.startedAtMs,
+        startedAtMs,
         endedAtMs,
         cutReason: reason,
       });
       setPipelineStatus(reason);
     },
     [enqueueChunk],
+  );
+
+  const closeActiveSegment = useCallback(
+    (reason, endedAtMs) => {
+      const segment = activeSegmentRef.current;
+      if (!segment) return;
+      activeSegmentRef.current = null;
+      enqueueAudioWindow(segment.chunks, segment.startedAtMs, endedAtMs, reason);
+    },
+    [enqueueAudioWindow],
+  );
+
+  const closePreSpeechProbe = useCallback(
+    (reason, endedAtMs) => {
+      const probe = preSpeechProbeRef.current;
+      if (!probe) return;
+      preSpeechProbeRef.current = null;
+      enqueueAudioWindow(probe.chunks, probe.startedAtMs, endedAtMs, reason);
+    },
+    [enqueueAudioWindow],
   );
 
   const handleAudioFrame = useCallback(
@@ -1483,42 +1501,61 @@ function App() {
         setLiveRecordingMs(endMs);
       }
       const noiseFloor = Math.max(0.0006, Number(liveWaveformFloorRef.current) || 0.002);
-      const speechDetected = level >= Math.max(SPEECH_RMS_THRESHOLD, noiseFloor * 3.2)
-        || peak >= SPEECH_PEAK_THRESHOLD;
+      const speechDetected = speechDetectedByEnergy(level, peak, noiseFloor);
       let segment = activeSegmentRef.current;
       if (!segment) {
         preSpeechFramesRef.current.push({ frame, startMs, endMs });
         preSpeechFramesRef.current = preSpeechFramesRef.current.filter(
           (item) => endMs - item.endMs <= PRE_SPEECH_BUFFER_MS,
         );
-        if (!speechDetected) return;
+        if (!speechDetected) {
+          if (!preSpeechProbeRef.current) {
+            preSpeechProbeRef.current = {
+              chunks: [],
+              startedAtMs: startMs,
+            };
+          }
+          preSpeechProbeRef.current.chunks.push(frame);
+          if (endMs - preSpeechProbeRef.current.startedAtMs >= PRE_SPEECH_PROBE_MS) {
+            closePreSpeechProbe("VAD 探测", endMs);
+          }
+          return;
+        }
+        preSpeechProbeRef.current = null;
         const buffered = preSpeechFramesRef.current;
         const firstBuffered = buffered[0];
         activeSegmentRef.current = {
           chunks: buffered.map((item) => item.frame),
           startedAtMs: firstBuffered?.startMs ?? startMs,
           firstSpeechAtMs: startMs,
+          lastSpeechAtMs: endMs,
         };
         preSpeechFramesRef.current = [];
         segment = activeSegmentRef.current;
       } else {
         segment.chunks.push(frame);
+        if (speechDetected) {
+          segment.lastSpeechAtMs = endMs;
+        }
       }
 
       const durationMs = endMs - segment.startedAtMs;
       const firstSpeechDurationMs = endMs - (segment.firstSpeechAtMs ?? segment.startedAtMs);
+      const silenceDurationMs = endMs - (segment.lastSpeechAtMs ?? segment.firstSpeechAtMs ?? segment.startedAtMs);
       if (
         !firstSpeechFlushDoneRef.current
         && firstSpeechDurationMs >= FIRST_SPEECH_FLUSH_MS
-        && durationMs >= MIN_FIRST_SPEECH_SEGMENT_MS
+        && durationMs >= MIN_SPEECH_WINDOW_MS
       ) {
         firstSpeechFlushDoneRef.current = true;
         closeActiveSegment("首段快速识别", endMs);
+      } else if (silenceDurationMs >= SPEECH_END_SILENCE_MS && durationMs >= MIN_SPEECH_WINDOW_MS) {
+        closeActiveSegment("VAD 语音结束", endMs);
       } else if (durationMs >= activeConfig.maxSegmentMs) {
-        closeActiveSegment("定时上传", endMs);
+        closeActiveSegment("VAD 最大窗口", endMs);
       }
     },
-    [closeActiveSegment],
+    [closeActiveSegment, closePreSpeechProbe],
   );
 
   const startMeeting = useCallback(async () => {
@@ -1595,6 +1632,7 @@ function App() {
       chunkSeqRef.current = 0;
       firstSpeechFlushDoneRef.current = false;
       preSpeechFramesRef.current = [];
+      preSpeechProbeRef.current = null;
 
       const audioContext = new AudioContextCtor();
       const source = audioContext.createMediaStreamSource(stream);
@@ -1715,6 +1753,9 @@ function App() {
     if (activeSegmentRef.current) {
       const endedAtMs = totalSamplesRef.current * 1000 / audioSampleRateRef.current;
       closeActiveSegment("手动停止", endedAtMs);
+    } else if (preSpeechProbeRef.current) {
+      const endedAtMs = totalSamplesRef.current * 1000 / audioSampleRateRef.current;
+      closePreSpeechProbe("VAD 探测结束", endedAtMs);
     }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
@@ -1762,7 +1803,7 @@ function App() {
       }
       await runFinalize(stoppedMeetingId, { allowWhileRecording: true });
     }
-  }, [closeActiveSegment, recording, refreshMeeting, refreshMeetings, runFinalize]);
+  }, [closeActiveSegment, closePreSpeechProbe, recording, refreshMeeting, refreshMeetings, runFinalize]);
 
   const finalize = useCallback(async () => {
     const id = meetingIdRef.current || meeting?.id;
@@ -2117,9 +2158,15 @@ function App() {
         const audioBuffer = await context.decodeAudioData(await file.arrayBuffer());
         await context.close();
         const samples = audioBufferToMono(audioBuffer);
-        const slicedChunks = makeFixedChunks(samples, audioBuffer.sampleRate, recordingConfigRef.current);
+        const slicedChunks = makeVadChunks(samples, audioBuffer.sampleRate, recordingConfigRef.current);
         chunkSeqRef.current = 0;
         setPipelineStatus(`正在整理音频 · ${slicedChunks.length} 段`);
+        if (slicedChunks.length === 0) {
+          setPipelineStatus("未检测到人声");
+          await refreshMeeting(id);
+          await refreshMeetings();
+          return;
+        }
         for (const item of slicedChunks) {
           chunkSeqRef.current += 1;
           const blob = encodeWav(item.samples, audioBuffer.sampleRate);

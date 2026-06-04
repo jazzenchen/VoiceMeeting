@@ -1,6 +1,14 @@
 import { DEFAULT_RECORDING_CONFIG, clampRecordingConfig } from "@/lib/recording-config";
 
 export const LIVE_WAVEFORM_BAR_COUNT = 256;
+export const FIRST_SPEECH_FLUSH_MS = 5000;
+export const MIN_SPEECH_WINDOW_MS = 1200;
+export const PRE_SPEECH_BUFFER_MS = 500;
+export const PRE_SPEECH_PROBE_MS = 3000;
+export const SPEECH_END_SILENCE_MS = 900;
+export const SPEECH_RMS_THRESHOLD = 0.006;
+export const SPEECH_PEAK_THRESHOLD = 0.035;
+const VAD_FRAME_MS = 30;
 
 export function concatFloat32(chunks) {
   const length = chunks.reduce((total, chunk) => total + chunk.length, 0);
@@ -109,6 +117,12 @@ export function displayMicLevel(level) {
   return Math.min(0.92, Math.max(0.08, shaped));
 }
 
+export function speechDetectedByEnergy(rms, peak, noiseFloor = 0.002) {
+  const floor = Math.max(0.0006, Number(noiseFloor) || 0.002);
+  return Math.max(0, Number(rms) || 0) >= Math.max(SPEECH_RMS_THRESHOLD, floor * 3.2)
+    || Math.max(0, Number(peak) || 0) >= SPEECH_PEAK_THRESHOLD;
+}
+
 export function audioBufferToMono(audioBuffer) {
   const length = audioBuffer.length;
   const channelCount = audioBuffer.numberOfChannels;
@@ -134,6 +148,90 @@ export function makeFixedChunks(samples, sampleRate, config = DEFAULT_RECORDING_
       endedAtMs: end * 1000 / sampleRate,
       cutReason: "导入固定切片",
     });
+  }
+  return chunks;
+}
+
+function frameStats(samples, start, end) {
+  let sum = 0;
+  let peak = 0;
+  const safeEnd = Math.min(samples.length, end);
+  for (let index = start; index < safeEnd; index += 1) {
+    const value = samples[index] || 0;
+    const abs = Math.abs(value);
+    peak = Math.max(peak, abs);
+    sum += value * value;
+  }
+  const count = Math.max(1, safeEnd - start);
+  return { rms: Math.sqrt(sum / count), peak };
+}
+
+function percentile(values, ratio) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((left, right) => left - right);
+  const index = Math.max(0, Math.min(sorted.length - 1, Math.floor(sorted.length * ratio)));
+  return sorted[index];
+}
+
+export function makeVadChunks(samples, sampleRate, config = DEFAULT_RECORDING_CONFIG) {
+  const normalized = clampRecordingConfig(config);
+  const maxSamples = Math.max(1, Math.round(sampleRate * normalized.maxSegmentMs / 1000));
+  const frameSamples = Math.max(1, Math.round(sampleRate * VAD_FRAME_MS / 1000));
+  const preSpeechSamples = Math.round(sampleRate * PRE_SPEECH_BUFFER_MS / 1000);
+  const postSpeechSamples = Math.round(sampleRate * SPEECH_END_SILENCE_MS / 1000);
+  const minWindowSamples = Math.round(sampleRate * MIN_SPEECH_WINDOW_MS / 1000);
+  const frameItems = [];
+
+  for (let start = 0; start < samples.length; start += frameSamples) {
+    const end = Math.min(samples.length, start + frameSamples);
+    const stats = frameStats(samples, start, end);
+    frameItems.push({ start, end, ...stats });
+  }
+
+  const noiseFloor = Math.max(0.0006, percentile(frameItems.map((item) => item.rms), 0.2) || 0.002);
+  const chunks = [];
+  let activeStart = null;
+  let lastSpeechEnd = null;
+
+  function pushWindow(startSample, endSample, reason) {
+    const start = Math.max(0, Math.min(samples.length, startSample));
+    const end = Math.max(start, Math.min(samples.length, endSample));
+    if (end - start < Math.max(1, minWindowSamples)) return;
+    chunks.push({
+      samples: samples.slice(start, end),
+      startedAtMs: start * 1000 / sampleRate,
+      endedAtMs: end * 1000 / sampleRate,
+      cutReason: reason,
+    });
+  }
+
+  for (const item of frameItems) {
+    const speech = speechDetectedByEnergy(item.rms, item.peak, noiseFloor);
+    if (speech && activeStart === null) {
+      activeStart = Math.max(0, item.start - preSpeechSamples);
+    }
+    if (speech) {
+      lastSpeechEnd = item.end;
+    }
+    if (activeStart === null || lastSpeechEnd === null) {
+      continue;
+    }
+
+    const activeDuration = item.end - activeStart;
+    const silenceDuration = item.end - lastSpeechEnd;
+    if (activeDuration >= maxSamples) {
+      pushWindow(activeStart, item.end, "VAD 最大窗口");
+      activeStart = null;
+      lastSpeechEnd = null;
+    } else if (silenceDuration >= postSpeechSamples) {
+      pushWindow(activeStart, item.end, "VAD 语音结束");
+      activeStart = null;
+      lastSpeechEnd = null;
+    }
+  }
+
+  if (activeStart !== null && lastSpeechEnd !== null) {
+    pushWindow(activeStart, Math.min(samples.length, lastSpeechEnd + postSpeechSamples), "VAD 语音结束");
   }
   return chunks;
 }
