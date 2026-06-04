@@ -929,16 +929,11 @@ function App() {
       const meta = modelCatalogByKey.get(`${item.kind}:${item.model}`);
       return item.label || meta?.label || item.model;
     }).join("、");
-    const ok = window.confirm(`当前设置缺少模型：${names}。是否现在下载？`);
-    if (!ok) {
-      setError("当前设置缺少本地模型。");
-      return false;
-    }
-    for (const item of missing) {
-      await downloadModel(item.kind, item.model);
-    }
+    setError(`当前设置缺少本地模型：${names}。请在设置里下载所需模型，或切换到已有模型。`);
+    setSettingsTab("recording");
+    setSettingsOpen(true);
     return false;
-  }, [downloadModel, missingModelsForConfig, modelCatalogByKey]);
+  }, [missingModelsForConfig, modelCatalogByKey]);
 
   const openMeetingProperties = useCallback(() => {
     if (!meeting?.id) return;
