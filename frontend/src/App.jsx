@@ -256,6 +256,21 @@ function App() {
     }
     return map;
   }, [modelCatalog?.diarization?.models, modelCatalogAsr, recordingAsrMetaByName]);
+  const modelMetaForRequirement = useCallback(
+    (item, catalog = modelCatalog) => {
+      if (!item?.kind || !item?.model) return null;
+      if (item.kind === "asr") {
+        return recordingAsrMetaByName.get(item.model)
+          || (catalog?.asr?.models || []).find((meta) => (meta.name || meta.id) === item.model)
+          || null;
+      }
+      if (item.kind === "diarization") {
+        return (catalog?.diarization?.models || []).find((meta) => (meta.name || meta.id) === item.model) || null;
+      }
+      return null;
+    },
+    [modelCatalog, recordingAsrMetaByName],
+  );
   const asrModelGroups = useMemo(() => {
     const groups = [];
     for (const backend of ["faster-whisper", "mlx", "funasr"]) {
@@ -598,7 +613,9 @@ function App() {
   }, [applyRecordingConfigStatus]);
 
   useEffect(() => {
-    const streamModelCatalog = (settingsOpen && settingsTab === "models") || Boolean(activeModelDownload);
+    const streamModelCatalog = (
+      settingsOpen && ["models", "recording"].includes(settingsTab)
+    ) || Boolean(activeModelDownload);
     if (!streamModelCatalog) return undefined;
     let socket = null;
     let reconnectTimer = 0;
@@ -892,12 +909,16 @@ function App() {
     return required;
   }, []);
 
-  const missingModelsForConfig = useCallback((config) => (
-    (modelCatalog || recordingAsrMetaByName.size > 0)
+  const missingModelsForConfig = useCallback((config, catalog = modelCatalog) => (
+    (catalog || recordingAsrMetaByName.size > 0)
       ? requiredModelsForConfig(config).map((item) => {
-        const meta = modelCatalogByKey.get(`${item.kind}:${item.model}`);
+        const meta = modelMetaForRequirement(item, catalog);
         const label = meta?.label || item.model;
-        if (!meta?.installed) {
+        if (!meta) {
+          if (item.kind !== "asr" && !catalog) return null;
+          return { ...item, type: "missing", label };
+        }
+        if (!meta.installed) {
           return { ...item, type: "missing", label };
         }
         if (item.kind === "diarization" && meta.available === false) {
@@ -911,10 +932,23 @@ function App() {
         return null;
       }).filter(Boolean)
       : []
-  ), [modelCatalog, modelCatalogByKey, recordingAsrMetaByName.size, requiredModelsForConfig]);
+  ), [modelCatalog, modelMetaForRequirement, recordingAsrMetaByName.size, requiredModelsForConfig]);
 
   const ensureRecordingModels = useCallback(async (config = recordingConfigRef.current) => {
-    const issues = missingModelsForConfig(config);
+    const requiredModels = requiredModelsForConfig(config);
+    let catalog = modelCatalog;
+    if (!catalog && requiredModels.some((item) => item.kind !== "asr")) {
+      try {
+        catalog = await api("/api/models");
+        setModelCatalog(catalog);
+      } catch (err) {
+        setError(userFriendlyError(err.message));
+        setSettingsTab("models");
+        setSettingsOpen(true);
+        return false;
+      }
+    }
+    const issues = missingModelsForConfig(config, catalog);
     if (issues.length === 0) return true;
     const unavailable = issues.filter((item) => item.type === "unavailable");
     if (unavailable.length > 0) {
@@ -926,14 +960,14 @@ function App() {
     }
     const missing = issues.filter((item) => item.type === "missing");
     const names = missing.map((item) => {
-      const meta = modelCatalogByKey.get(`${item.kind}:${item.model}`);
+      const meta = modelMetaForRequirement(item, catalog);
       return item.label || meta?.label || item.model;
     }).join("、");
     setError(`当前设置缺少本地模型：${names}。请在设置里下载所需模型，或切换到已有模型。`);
     setSettingsTab("recording");
     setSettingsOpen(true);
     return false;
-  }, [missingModelsForConfig, modelCatalogByKey]);
+  }, [missingModelsForConfig, modelCatalog, modelMetaForRequirement, requiredModelsForConfig]);
 
   const openMeetingProperties = useCallback(() => {
     if (!meeting?.id) return;
