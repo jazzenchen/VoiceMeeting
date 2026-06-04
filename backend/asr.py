@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import gc
 import os
 import re
 import subprocess
+import threading
 import wave
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -448,6 +450,17 @@ class MlxWhisperASR(FasterWhisperASR):
         self.base_model_name = base_model_name
         self.repo_id = repo_id or MLX_MODEL_REPOS.get(base_model_name, base_model_name)
         self._runtime_path = ""
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"mlx-asr-{base_model_name}")
+        self._worker_thread_id: Optional[int] = None
+
+    def _run_on_worker(self, func: Any, *args: Any, **kwargs: Any) -> Any:
+        if threading.get_ident() == self._worker_thread_id:
+            return func(*args, **kwargs)
+        return self._executor.submit(self._call_on_worker, func, args, kwargs).result()
+
+    def _call_on_worker(self, func: Any, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
+        self._worker_thread_id = threading.get_ident()
+        return func(*args, **kwargs)
 
     def status(self) -> Dict[str, Any]:
         return {
@@ -501,6 +514,9 @@ class MlxWhisperASR(FasterWhisperASR):
             self.last_error = str(exc)
             raise
 
+    def load(self) -> Any:
+        return self._run_on_worker(self._load_model)
+
     def _load_model(self) -> Any:
         if self._model is not None:
             return self._model
@@ -528,6 +544,9 @@ class MlxWhisperASR(FasterWhisperASR):
             self.loading = False
 
     def unload(self) -> None:
+        self._run_on_worker(self._unload_on_worker)
+
+    def _unload_on_worker(self) -> None:
         runtime_path = self._runtime_path
         super().unload()
         try:
@@ -540,6 +559,14 @@ class MlxWhisperASR(FasterWhisperASR):
             pass
 
     def transcribe(
+        self,
+        wav_path: Path,
+        language: Optional[str] = None,
+        context_prompt: str = "",
+    ) -> Dict[str, Any]:
+        return self._run_on_worker(self._transcribe_on_worker, wav_path, language, context_prompt)
+
+    def _transcribe_on_worker(
         self,
         wav_path: Path,
         language: Optional[str] = None,
