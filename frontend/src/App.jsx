@@ -31,7 +31,6 @@ import {
 import {
   findPlaybackChunkIndex,
   notesOnlyMarkdown,
-  pipelineStepIndex,
   playbackBounds,
   titleFromAudioFile,
 } from "@/lib/meeting-state";
@@ -313,7 +312,6 @@ function App() {
   const finalNotesWorking = finalizing || notesReprocessWorking;
   const reprocessWorking = reprocessBusy || ["queued", "running"].includes(reprocessRuntime?.status);
   const asrWorking = pendingChunks > 0 || activeChunks.length > 0 || reprocessWorking;
-  const activePipelineStep = pipelineStepIndex(displayRuntimeStatus, pendingChunks, pipelineStatus, finalizing, finalNotesWorking);
   const normalizedRecordingConfig = clampRecordingConfig(recordingConfig);
   const selectedAsrModelMeta = modelCatalogByKey.get(`asr:${normalizedRecordingConfig.asrModel}`);
   const serviceReady = status.backend === "ready";
@@ -2315,11 +2313,9 @@ function App() {
         startMeeting={startMeeting}
         stopRecording={stopRecording}
         uploadAudioFile={uploadAudioFile}
-        pipelineStatus={pipelineStatus}
         runtimeStatus={displayRuntimeStatus}
         pendingChunks={pendingChunks}
         micLevel={micLevel}
-        activePipelineStep={activePipelineStep}
         refreshMeetings={refreshMeetings}
         loadMeeting={loadMeeting}
         playbackMeetingId={playbackMeetingId}

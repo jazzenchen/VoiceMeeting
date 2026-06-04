@@ -9,10 +9,8 @@ import {
 
 import { Button } from "@/components/ui/button";
 import {
-  PIPELINE_STEPS,
   WAVE_PATTERN,
   formatOffset,
-  runtimeLine,
 } from "@/lib/meeting-display";
 import { useI18n } from "@/lib/i18n";
 
@@ -81,11 +79,9 @@ export function Sidebar({
   startMeeting,
   stopRecording,
   uploadAudioFile,
-  pipelineStatus,
   runtimeStatus,
   pendingChunks,
   micLevel,
-  activePipelineStep,
   refreshMeetings,
   loadMeeting,
   playbackMeetingId,
@@ -98,7 +94,6 @@ export function Sidebar({
   const reprocess = runtimeStatus?.reprocess;
   const reprocessActive = Boolean(reprocess && ["queued", "running"].includes(reprocess.status));
   const processing = pendingChunks > 0 || Boolean(runtimeStatus?.active_chunks?.length) || reprocessActive;
-  const runtimeText = runtimeLine(runtimeStatus, pendingChunks, t);
   const recordingUnavailable = !serviceReady
     ? t("本地语音服务还在启动中，请稍候。")
     : !recognitionReady
@@ -127,17 +122,6 @@ export function Sidebar({
                 <Square size={11} />
                 {t("停止")}
               </Button>
-            </div>
-            <div className="rail-recording-progress pipeline-steps" aria-label={t("录制处理进度")}>
-              {PIPELINE_STEPS.map((step, index) => (
-                <span
-                  className={index === activePipelineStep ? "step-active" : index < activePipelineStep ? "step-done" : ""}
-                  key={step}
-                  title={step}
-                >
-                  {t(step)}
-                </span>
-              ))}
             </div>
           </>
         ) : (
@@ -169,13 +153,6 @@ export function Sidebar({
               <div className="proc-mini warn">
                 <AlertCircle size={13} />
                 <span className="label">{recordingUnavailable}</span>
-              </div>
-            )}
-            {(processing || importingAudio) && (
-              <div className="proc-mini">
-                <span className="spin" />
-                <span className="label">{runtimeText || pipelineStatus || (importingAudio ? t("正在导入音频") : t("正在处理"))}</span>
-                {pendingChunks > 0 ? <span className="pct">{pendingChunks}</span> : <span className="proc-dots" aria-hidden="true"><i /><i /><i /></span>}
               </div>
             )}
           </>
