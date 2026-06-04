@@ -1,5 +1,4 @@
 import {
-  AlertCircle,
   FileAudio,
   Mic,
   Pause,
@@ -150,12 +149,6 @@ export function Sidebar({
                 disabled={!serviceReady || !recognitionReady || interactionLocked}
               />
             </label>
-            {recordingUnavailable && serviceReady && !processing && !importingAudio && (
-              <div className="proc-mini warn">
-                <AlertCircle size={13} />
-                <span className="label">{recordingUnavailable}</span>
-              </div>
-            )}
           </>
         )}
       </div>

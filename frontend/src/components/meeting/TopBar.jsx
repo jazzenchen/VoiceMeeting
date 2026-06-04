@@ -85,7 +85,7 @@ export function TopBar({
   ).size;
   const asrPillText = asrStatusText(modelStatus, recognitionUnavailableReason, t);
   const asrPillClass = recognitionUnavailableReason
-    ? "offline"
+    ? "warning"
     : modelStatus?.loading
     ? "working pulse-pill"
     : modelStatus?.loaded

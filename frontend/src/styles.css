@@ -192,6 +192,12 @@ a {
   border-color: #f1d7a0;
 }
 
+.pill.warning {
+  color: #8a4b05;
+  background: #fff7df;
+  border-color: #f2c46f;
+}
+
 .pulse-pill {
   position: relative;
   overflow: hidden;
@@ -2762,6 +2768,18 @@ a {
   border-color: var(--vm-border);
 }
 
+.app-shell .pill.warning {
+  color: #92400e;
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.46);
+}
+
+.app-shell[data-theme="dark"] .pill.warning {
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.16);
+  border-color: rgba(251, 191, 36, 0.45);
+}
+
 .app-shell .pill.working::before,
 .app-shell .pulse-pill::before {
   content: "";
@@ -2771,6 +2789,15 @@ a {
   background: var(--live);
   box-shadow: 0 0 8px var(--live);
   animation: pulse 1.4s infinite;
+}
+
+.app-shell .pill.warning::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 8px currentColor;
 }
 
 .app-shell .icon-btn {
