@@ -423,8 +423,9 @@ function App() {
         : asrReady
           ? ""
           : selectedAsrModelMeta?.installed
-            ? "当前录制模型尚未加载成功，请检查模型配置。"
+            ? "当前录制模型尚未加载，请先在设置里加载模型。"
             : "识别模型尚未加载，请先在设置里加载模型。";
+  const transcriptError = error && error === asrUnavailableReason ? "" : error;
   const servicePillClass = serviceStarting ? "working pulse-pill" : status.backend;
   const trimmedTitle = title.trim();
   const titleDirty = Boolean(meeting?.id && trimmedTitle && trimmedTitle !== meeting.title);
@@ -2611,6 +2612,7 @@ function App() {
           status={status}
           llmStatus={llmStatus}
           modelStatus={modelStatus}
+          recognitionUnavailableReason={asrUnavailableReason}
           servicePillClass={servicePillClass}
           asrWorking={asrWorking}
           runtimeStatus={displayRuntimeStatus}
@@ -2663,7 +2665,7 @@ function App() {
             reprocessWorking={reprocessWorking}
             startReprocess={startReprocess}
             createEditableVersion={createEditableVersion}
-            error={error}
+            error={transcriptError}
             asrWorking={asrWorking}
             runtimeStatus={displayRuntimeStatus}
             pendingChunks={pendingChunks}

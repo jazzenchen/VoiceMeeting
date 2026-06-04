@@ -122,6 +122,7 @@ const EN = {
   "卸载 {model}": "Unload {model}",
   "加载 {model}": "Load {model}",
   "完成": "Done",
+  "本地语音服务还在启动中，请稍候。": "Local speech service is still starting. Please wait.",
   "本地语音服务启动中": "Local speech service is starting",
   "本地语音服务未连接": "Local speech service is offline",
   "首次打开会解包运行环境，稍等后自动恢复。": "First launch unpacks the runtime. It will recover automatically.",

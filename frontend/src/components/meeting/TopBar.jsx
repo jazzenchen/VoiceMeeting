@@ -28,7 +28,8 @@ function serviceCompactText(value) {
   return serviceStatusText(value);
 }
 
-function asrStatusText(modelStatus, t) {
+function asrStatusText(modelStatus, recognitionUnavailableReason, t) {
+  if (recognitionUnavailableReason) return t(recognitionUnavailableReason);
   if (!modelStatus) return "";
   const model = modelStatus.label
     || asrModelName(modelStatus.model || modelStatus.runtime_model || modelStatus.configured_model || "");
@@ -50,6 +51,7 @@ export function TopBar({
   status,
   llmStatus,
   modelStatus,
+  recognitionUnavailableReason,
   servicePillClass,
   asrWorking,
   runtimeStatus,
@@ -81,8 +83,10 @@ export function TopBar({
       .map((item) => item?.speaker)
       .filter(Boolean),
   ).size;
-  const asrPillText = asrStatusText(modelStatus, t);
-  const asrPillClass = modelStatus?.loading
+  const asrPillText = asrStatusText(modelStatus, recognitionUnavailableReason, t);
+  const asrPillClass = recognitionUnavailableReason
+    ? "offline"
+    : modelStatus?.loading
     ? "working pulse-pill"
     : modelStatus?.loaded
       ? "ready"
@@ -107,7 +111,7 @@ export function TopBar({
       <div className="topbar-actions">
         <div className="status-strip">
           <span className={`pill ${servicePillClass}`}>{t("本地服务")} · {t(serviceCompactText(status.backend))}</span>
-          {asrPillText && <span className={`pill ${asrPillClass}`}>{asrPillText}</span>}
+          {asrPillText && <span className={`pill ${asrPillClass}`} title={asrPillText}>{asrPillText}</span>}
           <span className="pill ready">{speakerModeText}</span>
           <span className={`pill ${status.vibe}`}>
             {compactStatusText(assistantStatusText(llmStatus)).replace(/^LLM 模型接口\s*·\s*/u, "LLM 模型接口 ")}
