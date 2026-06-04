@@ -3914,6 +3914,14 @@ a {
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
+.rail-item.loading {
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface-2));
+}
+
+.rail-item.loading .badges {
+  color: var(--accent);
+}
+
 .sidebar.rail.locked .rail-item {
   background: transparent;
   box-shadow: none;

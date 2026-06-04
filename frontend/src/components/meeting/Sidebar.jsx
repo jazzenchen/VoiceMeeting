@@ -83,6 +83,7 @@ export function Sidebar({
   pendingChunks,
   refreshMeetings,
   loadMeeting,
+  loadingMeetingId,
   playbackMeetingId,
   playbackPositionMs,
   playbackDurationMs,
@@ -175,6 +176,7 @@ export function Sidebar({
       <ul className="rail-list">
         {meetings.map((item) => {
           const isActive = item.id === meeting?.id;
+          const isLoading = item.id === loadingMeetingId;
           const isPlaybackOwner = item.id === playbackMeetingId && (playbackPlaying || playbackBusy);
           const playProgress = playbackDurationMs > 0
             ? Math.max(0, Math.min(1, (Number(playbackPositionMs) || 0) / playbackDurationMs))
@@ -188,7 +190,7 @@ export function Sidebar({
           return (
             <li
               key={item.id}
-              className={`rail-item ${isActive ? "active" : ""} ${isPlaybackOwner ? "playing" : ""}`}
+              className={`rail-item ${isActive ? "active" : ""} ${isPlaybackOwner ? "playing" : ""} ${isLoading ? "loading" : ""}`}
               style={{ "--play-progress": `${playProgress * 100}%` }}
             >
               <button
@@ -204,7 +206,7 @@ export function Sidebar({
                 <span className="title">{item.title}</span>
                 <span className="meta-line">
                   <span className="meta">{formatDateTime(item.created_at)}</span>
-                  <span className="badges">{isPlaybackOwner ? playbackMeta : isActive ? activeMeetingMeta(meeting, t) : meetingMeta(item, t)}</span>
+                  <span className="badges">{isLoading ? t("加载中") : isPlaybackOwner ? playbackMeta : isActive ? activeMeetingMeta(meeting, t) : meetingMeta(item, t)}</span>
                 </span>
               </button>
             </li>

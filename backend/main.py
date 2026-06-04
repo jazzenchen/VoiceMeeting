@@ -44,7 +44,13 @@ from .diarization import (
     split_segments_by_turns,
 )
 from .llm import LLMManager
-from .meeting_audio import cleanup_chunk_audio_files, ensure_meeting_audio, meeting_audio_path, meeting_audio_waveform
+from .meeting_audio import (
+    cleanup_chunk_audio_files,
+    ensure_meeting_audio,
+    meeting_audio_path,
+    meeting_audio_status,
+    meeting_audio_waveform,
+)
 from .model_registry import (
     ASR_MODEL_CATALOG,
     FUNASR_MODEL_CATALOG,
@@ -1411,6 +1417,19 @@ async def meeting_audio(meeting_id: str) -> FileResponse:
     if not path.is_file():
         raise HTTPException(status_code=404, detail="完整会议音频还没有生成。")
     return FileResponse(str(path), media_type="audio/wav", filename=path.name)
+
+
+@app.get("/api/meetings/{meeting_id}/audio/status")
+async def meeting_audio_merge_status(meeting_id: str) -> Dict[str, Any]:
+    try:
+        meeting = store.get_meeting(meeting_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="找不到这场会议，可能已经被删除。")
+    path = meeting_audio_path(meeting_id)
+    return {
+        "meeting_id": meeting_id,
+        **meeting_audio_status(meeting.get("chunks") or [], path),
+    }
 
 
 @app.get("/api/meetings/{meeting_id}/waveform")

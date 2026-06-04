@@ -121,6 +121,7 @@ function App() {
   const [pendingChunks, setPendingChunks] = useState(0);
   const [error, setError] = useState("");
   const [audioMergeState, setAudioMergeState] = useState(null);
+  const [loadingMeetingId, setLoadingMeetingId] = useState("");
   const [modelStatus, setModelStatus] = useState(null);
   const [modelCatalog, setModelCatalog] = useState(null);
   const [recordingAsrOptions, setRecordingAsrOptions] = useState([]);
@@ -1941,6 +1942,7 @@ function App() {
       meetingIdRef.current = id;
       setError("");
       setAudioMergeState(null);
+      setLoadingMeetingId(id);
       setPipelineStatus("加载会议");
       if (targetSummary && meeting?.id !== id) {
         const preview = previewMeetingFromSummary(targetSummary);
@@ -1952,13 +1954,17 @@ function App() {
       }
 
       const loadingTitle = targetSummary?.title || meeting?.title || "今天的会议";
-      const showMergeTimer = window.setTimeout(() => {
-        if (meetingLoadRunRef.current !== runId) return;
-        setAudioMergeState({
-          meetingId: id,
-          title: loadingTitle,
+      api(`/api/meetings/${id}/audio/status`)
+        .then((statusData) => {
+          if (meetingLoadRunRef.current !== runId || !statusData?.needs_merge) return;
+          setAudioMergeState({
+            meetingId: id,
+            title: loadingTitle,
+          });
+        })
+        .catch(() => {
+          // Loading the meeting itself will surface any real error.
         });
-      }, 180);
 
       try {
         const data = await api(`/api/meetings/${id}`);
@@ -1969,9 +1975,9 @@ function App() {
         if (meetingLoadRunRef.current !== runId) return;
         setError(userFriendlyError(err.message));
       } finally {
-        window.clearTimeout(showMergeTimer);
         if (meetingLoadRunRef.current === runId) {
           setAudioMergeState(null);
+          setLoadingMeetingId("");
         }
       }
     },
@@ -2590,6 +2596,7 @@ function App() {
         pendingChunks={pendingChunks}
         refreshMeetings={refreshMeetings}
         loadMeeting={loadMeeting}
+        loadingMeetingId={loadingMeetingId}
         playbackMeetingId={playbackMeetingId}
         playbackPositionMs={playbackPositionMs}
         playbackDurationMs={playbackDurationMs}

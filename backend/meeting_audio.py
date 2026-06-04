@@ -174,6 +174,26 @@ def ensure_meeting_audio(chunks: Iterable[Dict[str, Any]], output_path: Path) ->
     return build_meeting_audio((chunk for chunk, _path in sources), output_path)
 
 
+def meeting_audio_status(chunks: Iterable[Dict[str, Any]], output_path: Path) -> Dict[str, Any]:
+    chunk_items = list(chunks)
+    sources = _source_wav_chunks(chunk_items)
+    duration_ms = audio_duration_ms(output_path) if output_path.is_file() else None
+    available = bool(duration_ms and duration_ms > 0)
+    needs_merge = False
+    latest_source_mtime = 0.0
+    if sources:
+        latest_source_mtime = max(source_path.stat().st_mtime for _chunk, source_path in sources)
+        needs_merge = not available or output_path.stat().st_mtime < latest_source_mtime
+    return {
+        "available": available,
+        "needs_merge": needs_merge,
+        "duration_ms": int(duration_ms or 0),
+        "chunk_count": len(sources) if sources else len(chunk_items),
+        "source_count": len(sources),
+        "latest_source_mtime": latest_source_mtime,
+    }
+
+
 def meeting_audio_waveform(path: Path, bins: int = 256) -> Dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError(str(path))
