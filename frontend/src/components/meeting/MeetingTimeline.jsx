@@ -287,13 +287,6 @@ function shapeAudioAmplitude(value, floor, ceiling) {
   return Math.max(0.018, Math.min(1, powerNorm * 0.86 + dbNorm * 0.14));
 }
 
-function apiUrl(path) {
-  const value = String(path || "").trim();
-  if (!value) return "";
-  if (/^https?:\/\//i.test(value)) return value;
-  return `${API_BASE}${value.startsWith("/") ? value : `/${value}`}`;
-}
-
 function waveformFromBins(bins) {
   const raw = bins.map((bin) => (bin.hasAudio ? Math.max(bin.peak * 0.82, bin.rms * 3.2) : 0));
   const floor = percentile(raw, 0.16) * 0.9;
@@ -305,56 +298,20 @@ function waveformFromBins(bins) {
   }));
 }
 
-async function decodeAudioUrlWaveform(audioUrl, durationMs, signal, onProgress) {
-  if (!audioUrl || durationMs <= 0) return null;
-  const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContextCtor) return null;
-
-  const bins = Array.from({ length: WAVEFORM_BAR_COUNT }, () => ({
-    peak: 0,
-    rms: 0,
-    samples: 0,
-    hasAudio: false,
-  }));
-  const context = new AudioContextCtor();
-  try {
-    const response = await fetch(apiUrl(audioUrl), { signal });
-    if (!response.ok) return null;
-    const audioBuffer = await context.decodeAudioData(await response.arrayBuffer());
-    if (signal?.aborted) return null;
-    const channel = audioBuffer.getChannelData(0);
-    const sampleRate = audioBuffer.sampleRate;
-    for (let index = 0; index < WAVEFORM_BAR_COUNT; index += 1) {
-      const windowStartMs = durationMs * index / WAVEFORM_BAR_COUNT;
-      const windowEndMs = durationMs * (index + 1) / WAVEFORM_BAR_COUNT;
-      const localStartSec = Math.max(0, windowStartMs / 1000);
-      const localEndSec = Math.min(audioBuffer.duration, windowEndMs / 1000);
-      if (localEndSec <= localStartSec) continue;
-
-      const startSample = Math.max(0, Math.floor(localStartSec * sampleRate));
-      const endSample = Math.min(channel.length, Math.ceil(localEndSec * sampleRate));
-      const stride = Math.max(1, Math.floor((endSample - startSample) / 240));
-      let peak = 0;
-      let sum = 0;
-      let count = 0;
-      for (let sample = startSample; sample < endSample; sample += stride) {
-        const value = Math.abs(channel[sample] || 0);
-        if (value > peak) peak = value;
-        sum += value * value;
-        count += 1;
-      }
-      if (!count) continue;
-      const rms = Math.sqrt(sum / count);
-      bins[index].peak = peak;
-      bins[index].rms = rms;
-      bins[index].samples = count;
-      bins[index].hasAudio = true;
-      if (index % 16 === 0) onProgress?.(Math.max(0, Math.min(1, index / WAVEFORM_BAR_COUNT)));
-    }
-  } finally {
-    context.close().catch(() => {});
-  }
-
+async function fetchMeetingAudioWaveform(meetingId, cacheToken, signal, onProgress) {
+  if (!meetingId) return null;
+  onProgress?.(0.08);
+  const params = new URLSearchParams({
+    bars: String(WAVEFORM_BAR_COUNT),
+  });
+  if (cacheToken) params.set("v", cacheToken);
+  const response = await fetch(`${API_BASE}/api/meetings/${encodeURIComponent(meetingId)}/waveform?${params}`, { signal });
+  if (!response.ok) return null;
+  onProgress?.(0.92);
+  const payload = await response.json();
+  if (signal?.aborted) return null;
+  const bins = Array.isArray(payload?.bins) ? payload.bins : [];
+  if (!bins.length) return null;
   onProgress?.(1);
   return waveformFromBins(bins);
 }
@@ -533,11 +490,23 @@ export function MeetingTimeline({
     }
 
     const controller = new AbortController();
+    let progressTimer = 0;
     setAudioWaveform(null);
     setWaveformLoading(true);
     setWaveformProgress(0);
+    if (audioSignature) {
+      setWaveformProgress(0.06);
+      progressTimer = window.setInterval(() => {
+        if (controller.signal.aborted) return;
+        setWaveformProgress((current) => (
+          current >= 0.88
+            ? current
+            : Math.min(0.88, current + Math.max(0.01, (0.88 - current) * 0.08))
+        ));
+      }, 180);
+    }
     const decode = audioSignature
-      ? decodeAudioUrlWaveform(canonicalAudioUrl, durationMs, controller.signal, (progress) => {
+      ? fetchMeetingAudioWaveform(meeting.id, audioSignature, controller.signal, (progress) => {
         if (!controller.signal.aborted) setWaveformProgress(progress);
       })
       : decodeMeetingWaveform(meeting.id, waveformChunks, durationMs, controller.signal, (progress) => {
@@ -545,6 +514,7 @@ export function MeetingTimeline({
       });
     decode
       .then((waveform) => {
+        if (progressTimer) window.clearInterval(progressTimer);
         if (!controller.signal.aborted) {
           if (waveform) {
             if (waveformCacheRef.current.size > 8) {
@@ -558,13 +528,17 @@ export function MeetingTimeline({
         }
       })
       .catch(() => {
+        if (progressTimer) window.clearInterval(progressTimer);
         if (!controller.signal.aborted) {
           setAudioWaveform(null);
           setWaveformLoading(false);
           setWaveformProgress(0);
         }
       });
-    return () => controller.abort();
+    return () => {
+      if (progressTimer) window.clearInterval(progressTimer);
+      controller.abort();
+    };
   }, [
     audioSignature,
     canonicalAudioUrl,

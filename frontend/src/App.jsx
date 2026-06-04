@@ -201,6 +201,7 @@ function App() {
   const playbackTimelineRef = useRef([]);
   const playbackRunRef = useRef(0);
   const playbackCacheRef = useRef(new Map());
+  const playbackAudioRef = useRef(null);
   const meetingLoadRunRef = useRef(0);
   const recordingConfigRef = useRef(recordingConfig);
   const liveWaveformRef = useRef([]);
@@ -2019,6 +2020,16 @@ function App() {
             }
           }
           playbackSourcesRef.current = [];
+          if (playbackAudioRef.current) {
+            try {
+              playbackAudioRef.current.pause();
+              playbackAudioRef.current.removeAttribute("src");
+              playbackAudioRef.current.load();
+            } catch {
+              // Native media may already be detached.
+            }
+            playbackAudioRef.current = null;
+          }
           if (playbackContextRef.current) {
             await playbackContextRef.current.close();
             playbackContextRef.current = null;
@@ -2071,6 +2082,16 @@ function App() {
       }
     }
     playbackSourcesRef.current = [];
+    if (playbackAudioRef.current) {
+      try {
+        playbackAudioRef.current.pause();
+        playbackAudioRef.current.removeAttribute("src");
+        playbackAudioRef.current.load();
+      } catch {
+        // Native media may already be detached.
+      }
+      playbackAudioRef.current = null;
+    }
     if (clearCache) playbackCacheRef.current.clear();
     if (playbackContextRef.current) {
       await playbackContextRef.current.close();
@@ -2134,6 +2155,72 @@ function App() {
       }
       const manifestDurationMs = Math.max(0, ...playableChunks.map((chunk) => playbackBounds(chunk).endMs));
       setPlaybackDurationMs(manifestDurationMs);
+
+      const fullAudioUrl = manifest.audio?.audio_url || (
+        playableChunks.length === 1 && String(playableChunks[0]?.id || "").startsWith("meeting-audio-")
+          ? playableChunks[0].audio_url
+          : ""
+      );
+      if (fullAudioUrl && playableChunks.length === 1) {
+        const runId = playbackRunRef.current + 1;
+        playbackRunRef.current = runId;
+        const audio = new Audio(apiUrl(fullAudioUrl));
+        audio.preload = "auto";
+        playbackAudioRef.current = audio;
+
+        const waitForAudio = (eventName, isReady) => new Promise((resolve, reject) => {
+          if (isReady()) {
+            resolve();
+            return;
+          }
+          const cleanup = () => {
+            audio.removeEventListener(eventName, handleReady);
+            audio.removeEventListener("error", handleError);
+          };
+          const handleReady = () => {
+            cleanup();
+            resolve();
+          };
+          const handleError = () => {
+            cleanup();
+            reject(new Error("回放加载失败。"));
+          };
+          audio.addEventListener(eventName, handleReady);
+          audio.addEventListener("error", handleError);
+        });
+
+        audio.load();
+        const playPromise = audio.play().catch((exc) => exc);
+        await waitForAudio("loadedmetadata", () => audio.readyState >= 1);
+        if (runId !== playbackRunRef.current) return;
+        const targetSec = Math.max(0, targetMs / 1000);
+        try {
+          audio.currentTime = Number.isFinite(audio.duration) && audio.duration > 0
+            ? Math.min(targetSec, Math.max(0, audio.duration - 0.05))
+            : targetSec;
+        } catch {
+          // Some browsers delay seekability until canplay; playback can still start at 0.
+        }
+        await waitForAudio("canplay", () => audio.readyState >= 3);
+        if (runId !== playbackRunRef.current) return;
+        const playResult = await playPromise;
+        if (playResult) throw playResult;
+
+        audio.addEventListener("ended", () => {
+          if (runId === playbackRunRef.current) {
+            stopPlayback("播放完成").catch(() => {});
+          }
+        });
+        playbackProgressTimerRef.current = window.setInterval(() => {
+          if (runId !== playbackRunRef.current) return;
+          setPlaybackPositionMs(Math.min(manifestDurationMs, Math.max(0, audio.currentTime * 1000)));
+        }, 80);
+        if (runId !== playbackRunRef.current) return;
+        setPlaying(true);
+        setPlaybackBusy(false);
+        setPlaybackStatus("回放中 · 完整会议音频");
+        return;
+      }
 
       const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
       if (!AudioContextCtor) {

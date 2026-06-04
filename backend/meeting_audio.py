@@ -174,6 +174,64 @@ def ensure_meeting_audio(chunks: Iterable[Dict[str, Any]], output_path: Path) ->
     return build_meeting_audio((chunk for chunk, _path in sources), output_path)
 
 
+def meeting_audio_waveform(path: Path, bins: int = 256) -> Dict[str, Any]:
+    if not path.is_file():
+        raise FileNotFoundError(str(path))
+    bin_count = max(32, min(2048, int(bins or 256)))
+    _channels, sample_width, sample_rate, frame_count = _validate_wav(path)
+    duration_ms = _ms_for_frame(frame_count)
+    items = [
+        {
+            "peak": 0.0,
+            "rms": 0.0,
+            "samples": 0,
+            "hasAudio": False,
+        }
+        for _index in range(bin_count)
+    ]
+    if frame_count <= 0:
+        return {
+            "duration_ms": 0,
+            "sample_rate": sample_rate,
+            "bins": items,
+        }
+
+    with wave.open(str(path), "rb") as handle:
+        for index in range(bin_count):
+            start_frame = int(frame_count * index / bin_count)
+            end_frame = int(frame_count * (index + 1) / bin_count)
+            frame_span = max(0, end_frame - start_frame)
+            if frame_span <= 0:
+                continue
+            stride = max(1, frame_span // 480)
+            handle.setpos(start_frame)
+            payload = handle.readframes(frame_span)
+            frame_width = sample_width * CHANNELS
+            peak = 0.0
+            total = 0.0
+            count = 0
+            for offset in range(0, len(payload), stride * frame_width):
+                sample = int.from_bytes(payload[offset:offset + sample_width], "little", signed=True)
+                value = abs(sample) / 32768.0
+                peak = max(peak, value)
+                total += value * value
+                count += 1
+            if count <= 0:
+                continue
+            items[index] = {
+                "peak": peak,
+                "rms": (total / count) ** 0.5,
+                "samples": count,
+                "hasAudio": peak > 0.0005,
+            }
+
+    return {
+        "duration_ms": duration_ms,
+        "sample_rate": sample_rate,
+        "bins": items,
+    }
+
+
 def cleanup_chunk_audio_files(chunks: Iterable[Dict[str, Any]], preserved_path: Path) -> int:
     preserved = preserved_path.resolve()
     removed = 0
