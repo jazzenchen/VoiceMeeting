@@ -773,7 +773,7 @@ async def create_meeting(payload: CreateMeetingRequest) -> Dict[str, Any]:
 @app.patch("/api/meetings/{meeting_id}")
 async def update_meeting(meeting_id: str, payload: UpdateMeetingRequest) -> Dict[str, Any]:
     try:
-        return store.update_meeting_title(meeting_id, payload.title, payload.description)
+        return attach_audio_payload(store.update_meeting_title(meeting_id, payload.title, payload.description))
     except KeyError:
         raise HTTPException(status_code=404, detail="找不到这场会议，可能已经被删除。")
 
@@ -826,7 +826,7 @@ async def create_meeting_version(
         )
         if payload.make_current:
             queue_summary_rebuild(meeting_id, background_tasks, "当前稿件已切换")
-        return meeting
+        return attach_audio_payload(meeting)
     except KeyError:
         raise HTTPException(status_code=404, detail="找不到这场会议，可能已经被删除。")
     except Exception as exc:
@@ -842,7 +842,7 @@ async def activate_meeting_version(
     try:
         meeting = store.set_active_transcript_version(meeting_id, version_id)
         queue_summary_rebuild(meeting_id, background_tasks, "当前稿件已切换")
-        return meeting
+        return attach_audio_payload(meeting)
     except KeyError:
         raise HTTPException(status_code=404, detail="找不到这份稿件，请刷新后再试。")
 
@@ -858,7 +858,7 @@ async def delete_meeting_version(
         meeting = store.delete_transcript_version(meeting_id, version_id)
         if (meeting_before.get("active_version_id") or "auto") == version_id:
             queue_summary_rebuild(meeting_id, background_tasks, "稿件已删除")
-        return meeting
+        return attach_audio_payload(meeting)
     except KeyError:
         raise HTTPException(status_code=404, detail="找不到这份稿件，请刷新后再试。")
     except ValueError as exc:
@@ -876,7 +876,7 @@ async def create_editable_meeting_version(
     try:
         meeting = store.create_editable_version(meeting_id, payload.source_version_id)
         queue_summary_rebuild(meeting_id, background_tasks, "已创建可编辑稿")
-        return meeting
+        return attach_audio_payload(meeting)
     except KeyError:
         raise HTTPException(status_code=404, detail="找不到会议或稿件，请刷新后再试。")
     except Exception as exc:
@@ -915,7 +915,7 @@ async def update_meeting_segment(
             speaker=payload.speaker,
         )
         queue_summary_rebuild(meeting_id, background_tasks, "文字已修改")
-        return meeting
+        return attach_audio_payload(meeting)
     except KeyError:
         raise HTTPException(status_code=404, detail="找不到这段文字，请刷新后再试。")
 
@@ -935,7 +935,7 @@ async def rename_meeting_speaker(
             new_label=payload.new_label,
         )
         queue_summary_rebuild(meeting_id, background_tasks, "说话人已修改")
-        return meeting
+        return attach_audio_payload(meeting)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except KeyError:
@@ -2225,7 +2225,7 @@ async def finalize_meeting_stream(meeting_id: str, payload: FinalizeRequest) -> 
             if not markdown.strip():
                 raise RuntimeError("纪要生成失败：模型接口没有返回内容。")
             store.set_final_markdown(meeting_id, markdown, source)
-            yield sse_event("done", {"meeting": store.get_meeting(meeting_id)})
+            yield sse_event("done", {"meeting": attach_audio_payload(store.get_meeting(meeting_id))})
         except Exception as exc:
             yield sse_event("error", {"error": str(exc)})
 
@@ -2260,7 +2260,7 @@ async def finalize_meeting(meeting_id: str, payload: FinalizeRequest) -> Dict[st
         except Exception as exc:
             raise HTTPException(status_code=502, detail=str(exc))
     store.set_final_markdown(meeting_id, markdown, source)
-    return store.get_meeting(meeting_id)
+    return attach_audio_payload(store.get_meeting(meeting_id))
 
 
 @app.post("/api/meetings/{meeting_id}/stop")
