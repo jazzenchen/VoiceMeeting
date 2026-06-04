@@ -125,7 +125,7 @@ export function transcriptVersionName(version, fallbackId = "auto") {
   const kind = version?.kind || (fallbackId === "auto" ? "initial" : "");
   const names = {
     initial: "原始稿",
-    asr: "重新识别稿",
+    asr: "重新整理稿",
     speaker: "说话人分离稿",
     merge: "人声整理稿",
     "llm-repair": "文字精修稿",

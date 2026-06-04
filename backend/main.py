@@ -848,7 +848,7 @@ async def start_reprocess_job(
         store.create_transcript_version(
             meeting_id=meeting_id,
             version_id=version_id,
-            label=f"ASR {requested_model} {stamp}",
+            label=f"重新整理 {stamp}",
             kind="asr",
             settings={
                 "model": requested_model,
@@ -1562,7 +1562,7 @@ async def reprocess_asr_version(
         set_reprocess_state(
             job_id,
             status="running",
-            stage="文字校准",
+            stage="整理文字",
             progress=0,
             total=len(chunks),
         )
@@ -1572,7 +1572,7 @@ async def reprocess_asr_version(
             meeting_for_prompt = store.get_meeting(meeting_id)
             set_reprocess_state(
                 job_id,
-                stage=f"文字校准 {index}/{len(chunks)}",
+                stage=f"整理文字 {index}/{len(chunks)}",
                 progress=index - 1,
                 total=len(chunks),
                 chunk_id=chunk.get("id"),
