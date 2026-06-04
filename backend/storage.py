@@ -391,6 +391,18 @@ class MeetingStore:
             if result.rowcount == 0:
                 raise KeyError(meeting_id)
 
+    def mark_interrupted_recordings(self) -> int:
+        with self._lock, self._connect() as conn:
+            result = conn.execute(
+                """
+                UPDATE meetings
+                SET status = 'interrupted', updated_at = ?
+                WHERE status = 'recording'
+                """,
+                (now_iso(),),
+            )
+            return result.rowcount
+
     def mark_interrupted_chunks(
         self,
         meeting_id: Optional[str] = None,
@@ -1104,6 +1116,16 @@ class MeetingStore:
                 stamp = now_iso()
                 start_ms = int(segment.get("start_ms") or 0)
                 end_ms = int(segment.get("end_ms") or 0)
+                absolute_start = segment.get("absolute_start_ms")
+                absolute_end = segment.get("absolute_end_ms")
+                if absolute_start is None:
+                    absolute_start_ms = chunk_start_ms + start_ms
+                else:
+                    absolute_start_ms = int(absolute_start)
+                if absolute_end is None:
+                    absolute_end_ms = chunk_start_ms + end_ms
+                else:
+                    absolute_end_ms = int(absolute_end)
                 row = {
                     "id": segment_id,
                     "meeting_id": meeting_id,
@@ -1111,8 +1133,8 @@ class MeetingStore:
                     "chunk_id": chunk_id,
                     "start_ms": start_ms,
                     "end_ms": end_ms,
-                    "absolute_start_ms": chunk_start_ms + start_ms,
-                    "absolute_end_ms": chunk_start_ms + end_ms,
+                    "absolute_start_ms": absolute_start_ms,
+                    "absolute_end_ms": absolute_end_ms,
                     "speaker": str(segment.get("speaker") or ""),
                     "text": str(segment.get("text") or "").strip(),
                     "confidence": segment.get("confidence"),

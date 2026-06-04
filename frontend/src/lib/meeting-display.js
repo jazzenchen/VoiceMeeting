@@ -194,6 +194,7 @@ export function asrBackendForModel(model) {
 export function meetingStatusName(statusValue) {
   const labels = {
     recording: "录音中",
+    interrupted: "已中断",
     stopped: "已停止",
     completed: "已完成",
     ready: "待开始",

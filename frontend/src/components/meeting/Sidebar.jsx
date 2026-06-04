@@ -32,6 +32,7 @@ function formatDateTime(value) {
 function statusLabel(status) {
   const labels = {
     completed: "已完成",
+    interrupted: "已中断",
     recording: "录音中",
     stopped: "已停止",
     ready: "待开始",

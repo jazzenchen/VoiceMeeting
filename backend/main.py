@@ -44,7 +44,7 @@ from .diarization import (
     split_segments_by_turns,
 )
 from .llm import LLMManager
-from .meeting_audio import ensure_meeting_audio, meeting_audio_path
+from .meeting_audio import cleanup_chunk_audio_files, ensure_meeting_audio, meeting_audio_path
 from .model_registry import (
     ASR_MODEL_CATALOG,
     FUNASR_MODEL_CATALOG,
@@ -107,6 +107,7 @@ app.add_middleware(
 )
 
 store = MeetingStore()
+store.mark_interrupted_recordings()
 store.mark_interrupted_chunks(error="服务重启时识别被中断，请重新识别这段音频。")
 asr_runtime = ASRRuntime()
 model_downloads = ModelDownloadManager(asr_runtime.engine_for_model)
@@ -320,6 +321,112 @@ def resolve_speaker_mode(value: Optional[str]) -> str:
     if mode not in SUPPORTED_SPEAKER_MODES:
         raise HTTPException(status_code=400, detail="当前说话人配置不可用。")
     return mode
+
+
+def chunk_sort_key(chunk: Dict[str, Any]) -> tuple[bool, int, int]:
+    started_at = chunk.get("started_at_ms")
+    seq = int(chunk.get("seq") or 0)
+    try:
+        started = int(started_at) if started_at is not None else None
+    except (TypeError, ValueError):
+        started = None
+    return started is None, started if started is not None else seq, seq
+
+
+def audio_payload(meeting_id: str, audio: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not audio:
+        return None
+    duration_ms = int(audio.get("duration_ms") or 0)
+    if duration_ms <= 0:
+        return None
+    chunk_count = int(audio.get("chunk_count") or 0)
+    audio_version = f"{chunk_count}-{duration_ms}"
+    return {
+        "audio_url": f"/api/meetings/{meeting_id}/audio?v={audio_version}",
+        "duration_ms": duration_ms,
+        "chunk_count": chunk_count,
+        "single_file": True,
+    }
+
+
+def attach_audio_payload(meeting: Dict[str, Any], audio: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = audio_payload(str(meeting.get("id") or ""), audio)
+    if payload is None:
+        path = meeting_audio_path(str(meeting.get("id") or ""))
+        if path.is_file():
+            duration_ms = audio_duration_ms(path)
+            if duration_ms and duration_ms > 0:
+                payload = audio_payload(
+                    str(meeting.get("id") or ""),
+                    {
+                        "duration_ms": duration_ms,
+                        "chunk_count": len(meeting.get("chunks") or []),
+                    },
+                )
+    if payload is None:
+        return meeting
+    return {**meeting, "audio": payload}
+
+
+def primary_timeline_chunk(meeting: Dict[str, Any]) -> Dict[str, Any]:
+    chunks = sorted(meeting.get("chunks") or [], key=chunk_sort_key)
+    if not chunks:
+        raise RuntimeError("这场会议没有可挂载时间线的音频记录。")
+    return {
+        **chunks[0],
+        "started_at_ms": 0,
+    }
+
+
+def segment_on_full_audio(segment: Dict[str, Any]) -> Dict[str, Any]:
+    start = segment.get("absolute_start_ms")
+    end = segment.get("absolute_end_ms")
+    if start is None:
+        start = segment.get("start_ms") or 0
+    if end is None:
+        end = segment.get("end_ms") or start or 0
+    try:
+        start_ms = max(0, int(start))
+    except (TypeError, ValueError):
+        start_ms = 0
+    try:
+        end_ms = max(start_ms, int(end))
+    except (TypeError, ValueError):
+        end_ms = start_ms
+    return {
+        **segment,
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+        "absolute_start_ms": start_ms,
+        "absolute_end_ms": end_ms,
+    }
+
+
+async def ensure_single_meeting_audio(
+    meeting_id: str,
+    *,
+    cleanup_chunks: bool = False,
+) -> Optional[Dict[str, Any]]:
+    meeting = store.get_meeting(meeting_id)
+    chunks = list(meeting.get("chunks") or [])
+    for chunk in chunks:
+        if existing_audio_path(chunk.get("wav_path")) is not None:
+            continue
+        if existing_audio_path(chunk.get("audio_path")) is None:
+            continue
+        try:
+            await asyncio.to_thread(prepare_chunk_wav, chunk)
+        except Exception:
+            continue
+
+    meeting = store.get_meeting(meeting_id)
+    chunks = list(meeting.get("chunks") or [])
+    output_path = meeting_audio_path(meeting_id)
+    audio = await asyncio.to_thread(ensure_meeting_audio, chunks, output_path)
+    if audio and cleanup_chunks:
+        removed = await asyncio.to_thread(cleanup_chunk_audio_files, chunks, output_path)
+        audio = {**audio, "removed_chunk_files": removed}
+    return audio
 
 
 def now_iso() -> str:
@@ -653,9 +760,14 @@ async def update_meeting(meeting_id: str, payload: UpdateMeetingRequest) -> Dict
 @app.get("/api/meetings/{meeting_id}")
 async def get_meeting(meeting_id: str) -> Dict[str, Any]:
     try:
-        return store.get_meeting(meeting_id)
+        meeting = store.get_meeting(meeting_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="找不到这场会议，可能已经被删除。")
+    audio = None
+    if meeting.get("status") != "recording":
+        audio = await ensure_single_meeting_audio(meeting_id, cleanup_chunks=False)
+        meeting = store.get_meeting(meeting_id)
+    return attach_audio_payload(meeting, audio)
 
 
 @app.get("/api/meetings/{meeting_id}/versions")
@@ -1188,28 +1300,19 @@ async def playback_manifest(meeting_id: str) -> Dict[str, Any]:
     except KeyError:
         raise HTTPException(status_code=404, detail="找不到这场会议，可能已经被删除。")
 
-    try:
-        audio = await asyncio.to_thread(
-            ensure_meeting_audio,
-            meeting.get("chunks") or [],
-            meeting_audio_path(meeting_id),
-        )
-    except Exception:
-        audio = None
-    if audio:
-        duration_ms = int(audio.get("duration_ms") or 0)
-        audio_version = f"{int(audio.get('chunk_count') or 0)}-{duration_ms}"
-        audio_url = f"/api/meetings/{meeting_id}/audio?v={audio_version}"
+    audio = None
+    if meeting.get("status") != "recording":
+        audio = await ensure_single_meeting_audio(meeting_id, cleanup_chunks=False)
+    payload = audio_payload(meeting_id, audio)
+    if payload:
+        duration_ms = int(payload.get("duration_ms") or 0)
+        audio_url = str(payload["audio_url"])
         return {
             "meeting_id": meeting_id,
-            "audio": {
-                "audio_url": audio_url,
-                "duration_ms": duration_ms,
-                "chunk_count": audio.get("chunk_count") or 0,
-            },
+            "audio": payload,
             "chunks": [
                 {
-                    "id": f"meeting-audio-{audio_version}",
+                    "id": f"meeting-audio-{duration_ms}",
                     "seq": 0,
                     "client_chunk_id": "",
                     "started_at_ms": 0,
@@ -1283,11 +1386,13 @@ async def playback_manifest(meeting_id: str) -> Dict[str, Any]:
 @app.get("/api/meetings/{meeting_id}/audio")
 async def meeting_audio(meeting_id: str) -> FileResponse:
     try:
-        store.get_meeting(meeting_id)
+        meeting = store.get_meeting(meeting_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="找不到这场会议，可能已经被删除。")
 
     path = meeting_audio_path(meeting_id)
+    if not path.is_file() and meeting.get("status") != "recording":
+        await ensure_single_meeting_audio(meeting_id, cleanup_chunks=False)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="完整会议音频还没有生成。")
     return FileResponse(str(path), media_type="audio/wav", filename=path.name)
@@ -1569,11 +1674,19 @@ async def reprocess_asr_version(
     try:
         asr_engine = asr_runtime.require_loaded_engine(model_name)
         meeting = store.get_meeting(meeting_id)
-        chunks = [
-            chunk
-            for chunk in (meeting.get("chunks") or [])
-            if existing_audio_path(chunk.get("wav_path"), chunk.get("audio_path")) is not None
-        ]
+        audio = await ensure_single_meeting_audio(meeting_id, cleanup_chunks=False)
+        if not audio:
+            raise RuntimeError("完整会议音频还没有生成，请先停止录制或重新导入音频。")
+        meeting = store.get_meeting(meeting_id)
+        anchor_chunk = primary_timeline_chunk(meeting)
+        audio_path = Path(str(audio["path"]))
+        full_audio_chunk = {
+            **anchor_chunk,
+            "duration_ms": int(audio.get("duration_ms") or 0),
+            "started_at_ms": 0,
+            "ended_at_ms": int(audio.get("duration_ms") or 0),
+            "cut_reason": "完整会议音频",
+        }
         store.delete_segments_for_version(meeting_id, version_id)
         store.update_transcript_version_status(meeting_id, version_id, "running")
         set_reprocess_state(
@@ -1581,89 +1694,83 @@ async def reprocess_asr_version(
             status="running",
             stage="整理文字",
             progress=0,
-            total=len(chunks),
+            total=1,
         )
 
-        recent_context = ""
-        for index, chunk in enumerate(chunks, start=1):
-            meeting_for_prompt = store.get_meeting(meeting_id)
-            set_reprocess_state(
-                job_id,
-                stage=f"整理文字 {index}/{len(chunks)}",
-                progress=index - 1,
-                total=len(chunks),
-                chunk_id=chunk.get("id"),
-            )
-            wav_path = await asyncio.to_thread(prepare_chunk_wav, chunk)
-            result = await asyncio.to_thread(
-                asr_engine.transcribe,
-                wav_path,
-                language,
-                asr_context_prompt(
-                    meeting_for_prompt,
-                    recent_context,
-                    prompt_settings.get("asr_context", ""),
-                ),
-            )
+        meeting_for_prompt = store.get_meeting(meeting_id)
+        set_reprocess_state(
+            job_id,
+            stage="整理文字 1/1",
+            progress=0,
+            total=1,
+            chunk_id=anchor_chunk.get("id"),
+        )
+        result = await asyncio.to_thread(
+            asr_engine.transcribe,
+            audio_path,
+            language,
+            asr_context_prompt(
+                meeting_for_prompt,
+                "",
+                prompt_settings.get("asr_context", ""),
+            ),
+        )
 
-            active_diarizer = diarizer_for_mode(speaker_mode)
-            if active_diarizer is not None:
-                try:
-                    turns = await asyncio.to_thread(active_diarizer.diarize, wav_path)
-                    if speaker_mode == "diarization":
-                        result["segments"] = split_segments_by_turns(result["segments"], turns)
-                        assigned_total += len(result["segments"])
-                    elif not speaker_tracker.enabled:
-                        result["segments"] = assign_speakers(result["segments"], turns)
-                        assigned_total += len(result["segments"])
-                except DiarizationUnavailable as exc:
-                    errors.append(str(exc))
+        active_diarizer = diarizer_for_mode(speaker_mode)
+        if active_diarizer is not None:
+            try:
+                turns = await asyncio.to_thread(active_diarizer.diarize, audio_path)
+                if speaker_mode == "diarization":
+                    result["segments"] = split_segments_by_turns(result["segments"], turns)
+                    assigned_total += len(result["segments"])
+                elif not speaker_tracker.enabled:
+                    result["segments"] = assign_speakers(result["segments"], turns)
+                    assigned_total += len(result["segments"])
+            except DiarizationUnavailable as exc:
+                errors.append(str(exc))
 
-            if speaker_mode == "off":
-                result["segments"] = clear_segment_speakers(result.get("segments") or [])
+        if speaker_mode == "off":
+            result["segments"] = clear_segment_speakers(result.get("segments") or [])
 
-            use_speaker_tracking = speaker_tracker.enabled and speaker_mode in {
-                "voiceprint",
-                "diarization",
-                "auto",
-            }
-            if use_speaker_tracking:
-                try:
-                    result["segments"], speaker_result = await asyncio.to_thread(
-                        speaker_tracker.assign_segments,
-                        store,
-                        meeting_id,
-                        wav_path,
-                        result["segments"],
-                    )
-                    assigned_total += int(speaker_result.get("assigned") or 0)
-                    created_total += int(speaker_result.get("created") or 0)
-                except SpeakerTrackingUnavailable as exc:
-                    errors.append(str(exc))
+        use_speaker_tracking = speaker_tracker.enabled and speaker_mode in {
+            "voiceprint",
+            "diarization",
+            "auto",
+        }
+        if use_speaker_tracking:
+            try:
+                result["segments"], speaker_result = await asyncio.to_thread(
+                    speaker_tracker.assign_segments,
+                    store,
+                    meeting_id,
+                    audio_path,
+                    result["segments"],
+                )
+                assigned_total += int(speaker_result.get("assigned") or 0)
+                created_total += int(speaker_result.get("created") or 0)
+            except SpeakerTrackingUnavailable as exc:
+                errors.append(str(exc))
 
-            raw_segments = result.get("segments") or []
-            if not [segment for segment in raw_segments if str(segment.get("text") or "").strip()]:
-                unrecognized_total += 1
-            segments_to_store = segments_or_unrecognized(chunk, raw_segments)
-            inserted = store.add_segments(
-                meeting_id,
-                chunk["id"],
-                segments_to_store,
-                version_id=version_id,
-            )
-            inserted_total += len(inserted)
-            recent_context = "\n".join(
-                segment.get("text", "")
-                for segment in inserted[-8:]
-                if segment.get("text")
-                and not is_unrecognized_text(segment.get("text"))
-            ) or recent_context
-            set_reprocess_state(
-                job_id,
-                progress=index,
-                inserted_segments=inserted_total,
-                unrecognized_segments=unrecognized_total,
-            )
+        raw_segments = [segment_on_full_audio(segment) for segment in (result.get("segments") or [])]
+        if not [segment for segment in raw_segments if str(segment.get("text") or "").strip()]:
+            unrecognized_total += 1
+        segments_to_store = [
+            segment_on_full_audio(segment)
+            for segment in segments_or_unrecognized(full_audio_chunk, raw_segments)
+        ]
+        inserted = store.add_segments(
+            meeting_id,
+            anchor_chunk["id"],
+            segments_to_store,
+            version_id=version_id,
+        )
+        inserted_total += len(inserted)
+        set_reprocess_state(
+            job_id,
+            progress=1,
+            inserted_segments=inserted_total,
+            unrecognized_segments=unrecognized_total,
+        )
 
         settings = {
             "model": model_name,
@@ -1683,7 +1790,7 @@ async def reprocess_asr_version(
             job_id,
             status="done",
             stage="done",
-            progress=len(chunks),
+            progress=1,
             inserted_segments=inserted_total,
             unrecognized_segments=unrecognized_total,
             assigned_segments=assigned_total,
@@ -1722,82 +1829,77 @@ async def reprocess_speaker_version(
             store.delete_speakers(meeting_id)
 
         meeting = store.get_meeting(meeting_id)
+        audio = await ensure_single_meeting_audio(meeting_id, cleanup_chunks=False)
+        if not audio:
+            raise RuntimeError("完整会议音频还没有生成，请先停止录制或重新导入音频。")
+        meeting = store.get_meeting(meeting_id)
+        anchor_chunk = primary_timeline_chunk(meeting)
+        audio_path = Path(str(audio["path"]))
         source_segments = store.get_segments_for_version(meeting_id, source_version_id)
-        chunks_by_id = {chunk.get("id"): chunk for chunk in (meeting.get("chunks") or [])}
-        segments_by_chunk: Dict[str, list[Dict[str, Any]]] = defaultdict(list)
-        for segment in source_segments:
-            if segment.get("chunk_id"):
-                segments_by_chunk[str(segment["chunk_id"])].append(segment)
-
-        chunk_items = [
-            (chunk_id, chunks_by_id.get(chunk_id), segments)
-            for chunk_id, segments in segments_by_chunk.items()
-            if chunks_by_id.get(chunk_id) is not None
-        ]
+        source_segments = [segment_on_full_audio(segment) for segment in source_segments]
         set_reprocess_state(
             job_id,
             status="running",
             stage="说话人分离",
             progress=0,
-            total=len(chunk_items),
+            total=1,
         )
 
-        for index, (chunk_id, chunk, segments) in enumerate(chunk_items, start=1):
-            set_reprocess_state(
-                job_id,
-                stage=f"说话人分离 {index}/{len(chunk_items)}",
-                progress=index - 1,
-                total=len(chunk_items),
-                chunk_id=chunk_id,
-            )
-            assigned_segments = segments
-            try:
-                wav_path = await asyncio.to_thread(prepare_chunk_wav, chunk)
-                active_diarizer = diarizer_for_mode(speaker_mode)
-                if active_diarizer is not None:
-                    turns = await asyncio.to_thread(active_diarizer.diarize, wav_path)
-                    if speaker_mode == "diarization":
-                        assigned_segments = split_segments_by_turns(segments, turns)
-                        assigned_total += len(assigned_segments)
-                    elif not speaker_tracker.enabled:
-                        assigned_segments = assign_speakers(segments, turns)
-                        assigned_total += len(assigned_segments)
+        set_reprocess_state(
+            job_id,
+            stage="说话人分离 1/1",
+            progress=0,
+            total=1,
+            chunk_id=anchor_chunk.get("id"),
+        )
+        assigned_segments = source_segments
+        try:
+            active_diarizer = diarizer_for_mode(speaker_mode)
+            if active_diarizer is not None:
+                turns = await asyncio.to_thread(active_diarizer.diarize, audio_path)
+                if speaker_mode == "diarization":
+                    assigned_segments = split_segments_by_turns(source_segments, turns)
+                    assigned_total += len(assigned_segments)
+                elif not speaker_tracker.enabled:
+                    assigned_segments = assign_speakers(source_segments, turns)
+                    assigned_total += len(assigned_segments)
 
-                if speaker_mode == "off":
-                    assigned_segments = clear_segment_speakers(segments)
+            if speaker_mode == "off":
+                assigned_segments = clear_segment_speakers(source_segments)
 
-                use_speaker_tracking = speaker_tracker.enabled and speaker_mode in {
-                    "voiceprint",
-                    "diarization",
-                    "auto",
-                }
-                if use_speaker_tracking:
-                    assigned_segments, speaker_result = await asyncio.to_thread(
-                        speaker_tracker.assign_segments,
-                        store,
-                        meeting_id,
-                        wav_path,
-                        assigned_segments,
-                    )
-                    assigned_total += int(speaker_result.get("assigned") or 0)
-                    created_total += int(speaker_result.get("created") or 0)
-            except Exception as exc:
-                errors.append(str(exc))
+            use_speaker_tracking = speaker_tracker.enabled and speaker_mode in {
+                "voiceprint",
+                "diarization",
+                "auto",
+            }
+            if use_speaker_tracking:
+                assigned_segments, speaker_result = await asyncio.to_thread(
+                    speaker_tracker.assign_segments,
+                    store,
+                    meeting_id,
+                    audio_path,
+                    assigned_segments,
+                )
+                assigned_total += int(speaker_result.get("assigned") or 0)
+                created_total += int(speaker_result.get("created") or 0)
+        except Exception as exc:
+            errors.append(str(exc))
 
-            inserted = store.add_segments(
-                meeting_id,
-                chunk_id,
-                assigned_segments,
-                version_id=version_id,
-            )
-            inserted_total += len(inserted)
-            set_reprocess_state(
-                job_id,
-                progress=index,
-                inserted_segments=inserted_total,
-                assigned_segments=assigned_total,
-                created_speakers=created_total,
-            )
+        assigned_segments = [segment_on_full_audio(segment) for segment in assigned_segments]
+        inserted = store.add_segments(
+            meeting_id,
+            anchor_chunk["id"],
+            assigned_segments,
+            version_id=version_id,
+        )
+        inserted_total += len(inserted)
+        set_reprocess_state(
+            job_id,
+            progress=1,
+            inserted_segments=inserted_total,
+            assigned_segments=assigned_total,
+            created_speakers=created_total,
+        )
 
         settings = {
             "source_version_id": source_version_id,
@@ -1815,7 +1917,7 @@ async def reprocess_speaker_version(
             job_id,
             status="done",
             stage="done",
-            progress=len(chunk_items),
+            progress=1,
             inserted_segments=inserted_total,
             assigned_segments=assigned_total,
             created_speakers=created_total,
@@ -2109,7 +2211,8 @@ async def stop_meeting(meeting_id: str) -> Dict[str, Any]:
     try:
         store.update_meeting_status(meeting_id, "stopped")
         store.mark_interrupted_chunks(meeting_id, error="录音已停止，未完成的识别已取消。")
-        return store.get_meeting(meeting_id)
+        audio = await ensure_single_meeting_audio(meeting_id, cleanup_chunks=True)
+        return attach_audio_payload(store.get_meeting(meeting_id), audio)
     except KeyError:
         raise HTTPException(status_code=404, detail="找不到这场会议，可能已经被删除。")
 

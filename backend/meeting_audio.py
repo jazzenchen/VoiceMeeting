@@ -149,18 +149,49 @@ def build_meeting_audio(chunks: Iterable[Dict[str, Any]], output_path: Path) -> 
 
 
 def ensure_meeting_audio(chunks: Iterable[Dict[str, Any]], output_path: Path) -> Optional[Dict[str, Any]]:
-    sources = _source_wav_chunks(chunks)
+    chunk_items = list(chunks)
+    sources = _source_wav_chunks(chunk_items)
+    if output_path.is_file():
+        duration_ms = audio_duration_ms(output_path)
+        if duration_ms and duration_ms > 0:
+            if not sources:
+                return {
+                    "path": str(output_path),
+                    "duration_ms": duration_ms,
+                    "chunk_count": len(chunk_items),
+                }
+            latest_source_mtime = max(source_path.stat().st_mtime for _chunk, source_path in sources)
+            if output_path.stat().st_mtime >= latest_source_mtime:
+                return {
+                    "path": str(output_path),
+                    "duration_ms": duration_ms,
+                    "chunk_count": len(sources),
+                }
+
     if not sources:
         return None
 
-    latest_source_mtime = max(source_path.stat().st_mtime for _chunk, source_path in sources)
-    if output_path.is_file() and output_path.stat().st_mtime >= latest_source_mtime:
-        duration_ms = audio_duration_ms(output_path)
-        if duration_ms and duration_ms > 0:
-            return {
-                "path": str(output_path),
-                "duration_ms": duration_ms,
-                "chunk_count": len(sources),
-            }
-
     return build_meeting_audio((chunk for chunk, _path in sources), output_path)
+
+
+def cleanup_chunk_audio_files(chunks: Iterable[Dict[str, Any]], preserved_path: Path) -> int:
+    preserved = preserved_path.resolve()
+    removed = 0
+    seen: set[Path] = set()
+    for chunk in chunks:
+        for key in ("audio_path", "wav_path"):
+            value = chunk.get(key)
+            if not value:
+                continue
+            path = Path(str(value))
+            if path in seen:
+                continue
+            seen.add(path)
+            try:
+                if not path.is_file() or path.resolve() == preserved:
+                    continue
+                path.unlink()
+                removed += 1
+            except Exception:
+                continue
+    return removed
