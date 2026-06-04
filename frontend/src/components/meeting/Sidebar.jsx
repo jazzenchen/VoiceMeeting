@@ -101,7 +101,7 @@ export function Sidebar({
       : "";
 
   return (
-    <aside className="sidebar rail">
+    <aside className={`sidebar rail${interactionLocked ? " locked" : ""}`}>
       <div className="rail-brand">
         <div className="mark">V</div>
         <div>

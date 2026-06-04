@@ -3861,6 +3861,16 @@ a {
   cursor: pointer;
 }
 
+.sidebar.rail.locked .rail-section {
+  color: var(--fg-4);
+}
+
+.sidebar.rail.locked .rail-search {
+  color: var(--fg-4);
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .rail-list {
   min-height: 0;
   flex: 1;
@@ -3904,6 +3914,30 @@ a {
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
+.sidebar.rail.locked .rail-item {
+  background: transparent;
+  box-shadow: none;
+  opacity: 0.58;
+}
+
+.sidebar.rail.locked .rail-item:hover {
+  background: transparent;
+}
+
+.sidebar.rail.locked .rail-item.active {
+  background: color-mix(in srgb, var(--surface-2) 44%, transparent);
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent) 45%, transparent);
+  opacity: 0.74;
+}
+
+.sidebar.rail.locked .rail-item.playing {
+  background: color-mix(in srgb, var(--surface-2) 40%, transparent);
+}
+
+.sidebar.rail.locked .rail-item.playing::before {
+  opacity: 0;
+}
+
 .rail-item.playing::before {
   opacity: 1;
 }
@@ -3939,6 +3973,10 @@ a {
   cursor: pointer;
 }
 
+.rail-open:disabled {
+  cursor: not-allowed;
+}
+
 .rail-open .title {
   min-width: 0;
   overflow: hidden;
@@ -3947,6 +3985,10 @@ a {
   color: var(--fg);
   font-size: 13px;
   font-weight: 650;
+}
+
+.rail-open:disabled .title {
+  color: var(--fg-3);
 }
 
 .rail-open .meta-line {
@@ -3973,6 +4015,20 @@ a {
   color: var(--fg-3);
   font-family: var(--type-mono);
   font-size: 10.5px;
+}
+
+.rail-open:disabled .meta,
+.rail-open:disabled .badges {
+  color: var(--fg-4);
+}
+
+.sidebar.rail.locked .rail-item.active .title {
+  color: var(--fg-2);
+}
+
+.sidebar.rail.locked .rail-item.active .meta,
+.sidebar.rail.locked .rail-item.active .badges {
+  color: var(--fg-3);
 }
 
 .rail-foot {
