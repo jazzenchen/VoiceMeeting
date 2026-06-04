@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AudioMergeDialog } from "@/components/meeting/AudioMergeDialog";
 import { DeleteMeetingDialog } from "@/components/meeting/DeleteMeetingDialog";
 import { MeetingTimeline } from "@/components/meeting/MeetingTimeline";
 import { MeetingPropertiesDialog } from "@/components/meeting/MeetingPropertiesDialog";
@@ -64,6 +65,48 @@ import {
   recordingConfigsEqual,
 } from "@/lib/recording-config";
 
+function previewMeetingFromSummary(item) {
+  if (!item?.id) return null;
+  return {
+    id: item.id,
+    title: item.title || "今天的会议",
+    description: item.description || "",
+    status: item.status || "stopped",
+    created_at: item.created_at || "",
+    updated_at: item.updated_at || item.created_at || "",
+    active_version_id: "auto",
+    transcript_versions: [],
+    summary: {},
+    summary_source_hash: "",
+    summary_source_version_id: "",
+    summary_segment_count: 0,
+    final_source_hash: "",
+    final_source_version_id: "",
+    final_markdown: "",
+    segments: [],
+    utterances: [],
+    chunks: [],
+    speakers: [],
+  };
+}
+
+function globalPlaybackShortcutTarget(target) {
+  if (!target || typeof target.closest !== "function") return false;
+  if (target.isContentEditable) return true;
+  return Boolean(target.closest([
+    "input",
+    "textarea",
+    "select",
+    "button",
+    "a",
+    "[contenteditable='true']",
+    "[role='textbox']",
+    "[role='button']",
+    "[role='menuitem']",
+    "[role='option']",
+  ].join(",")));
+}
+
 function App() {
   const [meeting, setMeeting] = useState(null);
   const [meetings, setMeetings] = useState([]);
@@ -76,6 +119,7 @@ function App() {
   const [finalNotesError, setFinalNotesError] = useState("");
   const [pendingChunks, setPendingChunks] = useState(0);
   const [error, setError] = useState("");
+  const [audioMergeState, setAudioMergeState] = useState(null);
   const [modelStatus, setModelStatus] = useState(null);
   const [modelCatalog, setModelCatalog] = useState(null);
   const [recordingAsrOptions, setRecordingAsrOptions] = useState([]);
@@ -156,6 +200,7 @@ function App() {
   const playbackTimelineRef = useRef([]);
   const playbackRunRef = useRef(0);
   const playbackCacheRef = useRef(new Map());
+  const meetingLoadRunRef = useRef(0);
   const recordingConfigRef = useRef(recordingConfig);
   const liveWaveformRef = useRef([]);
   const liveWaveformEmitRef = useRef(0);
@@ -1888,10 +1933,47 @@ function App() {
   const loadMeeting = useCallback(
     async (id) => {
       if (recording && id !== meetingIdRef.current) return;
+      const targetSummary = meetings.find((item) => item.id === id) || (meeting?.id === id ? meeting : null);
+      const runId = meetingLoadRunRef.current + 1;
+      meetingLoadRunRef.current = runId;
       meetingIdRef.current = id;
-      await refreshMeeting(id);
+      setError("");
+      setAudioMergeState(null);
+      setPipelineStatus("加载会议");
+      if (targetSummary && meeting?.id !== id) {
+        const preview = previewMeetingFromSummary(targetSummary);
+        if (preview) {
+          setMeeting(preview);
+          setRuntimeStatus(null);
+          setPlaybackPreview({ meetingId: null, positionMs: null });
+        }
+      }
+
+      const loadingTitle = targetSummary?.title || meeting?.title || "今天的会议";
+      const showMergeTimer = window.setTimeout(() => {
+        if (meetingLoadRunRef.current !== runId) return;
+        setAudioMergeState({
+          meetingId: id,
+          title: loadingTitle,
+        });
+      }, 180);
+
+      try {
+        const data = await api(`/api/meetings/${id}`);
+        if (meetingLoadRunRef.current !== runId) return;
+        setMeeting(data);
+        setPipelineStatus("会议已加载");
+      } catch (err) {
+        if (meetingLoadRunRef.current !== runId) return;
+        setError(userFriendlyError(err.message));
+      } finally {
+        window.clearTimeout(showMergeTimer);
+        if (meetingLoadRunRef.current === runId) {
+          setAudioMergeState(null);
+        }
+      }
     },
-    [recording, refreshMeeting],
+    [meeting, meetings, recording],
   );
 
   useEffect(() => {
@@ -2169,6 +2251,41 @@ function App() {
         : 0;
     await startPlaybackAt(resumeMs);
   }, [meeting?.id, playbackMeetingId, playbackPositionMs, playbackPreview, playing, recording, startPlaybackAt, stopPlayback]);
+
+  useEffect(() => {
+    const handleGlobalPlaybackKey = (event) => {
+      if (event.defaultPrevented || event.repeat) return;
+      if (event.altKey || event.ctrlKey || event.metaKey) return;
+      if (event.code !== "Space" && event.key !== " " && event.key !== "Spacebar") return;
+      if (
+        !meeting?.id
+        || recording
+        || playbackBusy
+        || settingsOpen
+        || propertiesOpen
+        || Boolean(deleteTarget)
+        || Boolean(modelLoadState)
+        || Boolean(audioMergeState)
+      ) {
+        return;
+      }
+      if (globalPlaybackShortcutTarget(event.target)) return;
+      event.preventDefault();
+      playMeeting().catch((err) => setError(userFriendlyError(err.message)));
+    };
+    window.addEventListener("keydown", handleGlobalPlaybackKey);
+    return () => window.removeEventListener("keydown", handleGlobalPlaybackKey);
+  }, [
+    audioMergeState,
+    deleteTarget,
+    meeting?.id,
+    modelLoadState,
+    playMeeting,
+    playbackBusy,
+    propertiesOpen,
+    recording,
+    settingsOpen,
+  ]);
 
   const previewPlaybackAt = useCallback((startMs) => {
     if (recording) return;
@@ -2555,6 +2672,8 @@ function App() {
         onCancel={() => setDeleteTarget(null)}
         onConfirm={deleteMeeting}
       />
+
+      <AudioMergeDialog state={audioMergeState} />
 
       <ModelLoadDialog
         state={modelLoadState}

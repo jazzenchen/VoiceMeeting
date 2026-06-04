@@ -5099,10 +5099,18 @@ a {
   cursor: wait;
 }
 
+.app-shell .audio-merge-backdrop {
+  cursor: wait;
+}
+
 .app-shell .model-load-dialog {
   width: min(420px, calc(100vw - 48px));
   text-align: center;
   align-items: center;
+}
+
+.app-shell .audio-merge-dialog {
+  width: min(440px, calc(100vw - 48px));
 }
 
 .app-shell .model-load-icon {
