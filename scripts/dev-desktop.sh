@@ -25,4 +25,4 @@ bun run scripts/setup-dev-sidecar.js
 
 cd tauri
 bun install
-bun run tauri dev
+bun run tauri dev --no-watch

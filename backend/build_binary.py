@@ -19,9 +19,11 @@ def _add_options(args: list[str], flag: str, values: list[str]) -> None:
 
 def build_server() -> None:
     backend_dir = Path(__file__).resolve().parent
+    package_mode = os.environ.get("VOICE_MEETING_PYINSTALLER_MODE", "onedir").strip().lower()
+    if package_mode not in {"onedir", "onefile"}:
+        raise ValueError("VOICE_MEETING_PYINSTALLER_MODE must be 'onedir' or 'onefile'.")
     args = [
         "server.py",
-        "--onefile",
         "--name",
         "voice-meeting-server",
         "--hidden-import",
@@ -66,10 +68,24 @@ def build_server() -> None:
         "torch",
         "--hidden-import",
         "litellm",
+        "--hidden-import",
+        "tokenizers",
+        "--hidden-import",
+        "tiktoken",
+        "--hidden-import",
+        "tiktoken_ext.openai_public",
         "--collect-all",
         "resemblyzer",
         "--collect-all",
         "imageio_ffmpeg",
+        "--collect-all",
+        "litellm",
+        "--collect-all",
+        "tokenizers",
+        "--collect-all",
+        "tiktoken",
+        "--collect-all",
+        "tiktoken_ext",
         "--copy-metadata",
         "huggingface-hub",
         "--copy-metadata",
@@ -79,6 +95,10 @@ def build_server() -> None:
         "--copy-metadata",
         "litellm",
         "--copy-metadata",
+        "tokenizers",
+        "--copy-metadata",
+        "tiktoken",
+        "--copy-metadata",
         "openai",
         "--distpath",
         str(backend_dir / "dist"),
@@ -87,14 +107,16 @@ def build_server() -> None:
         "--noconfirm",
         "--clean",
     ]
+    if package_mode == "onefile":
+        args.append("--onefile")
 
     if platform.system() == "Windows":
         args.append("--noconsole")
 
     if _is_apple_mlx_platform():
-        _add_options(args, "--hidden-import", ["mlx", "mlx.core", "mlx_whisper", "tiktoken"])
-        _add_options(args, "--collect-all", ["mlx", "mlx_whisper", "tiktoken", "regex"])
-        _add_options(args, "--copy-metadata", ["mlx", "mlx-whisper", "tiktoken"])
+        _add_options(args, "--hidden-import", ["mlx", "mlx.core", "mlx_whisper"])
+        _add_options(args, "--collect-all", ["mlx", "mlx_whisper", "regex"])
+        _add_options(args, "--copy-metadata", ["mlx", "mlx-whisper"])
         _add_options(
             args,
             "--exclude-module",
@@ -121,20 +143,19 @@ def build_server() -> None:
                 "sklearn",
                 "sqlalchemy",
                 "sympy",
-                "tokenizers",
                 "torchcodec",
                 "torchaudio",
                 "transformers",
             ],
         )
     else:
+        _add_options(args, "--exclude-module", ["mlx", "mlx.core", "mlx_whisper"])
         _add_options(
             args,
             "--hidden-import",
             [
                 "faster_whisper",
                 "ctranslate2",
-                "tokenizers",
                 "funasr",
                 "modelscope",
                 "torchaudio",
@@ -149,7 +170,6 @@ def build_server() -> None:
             [
                 "faster_whisper",
                 "ctranslate2",
-                "tokenizers",
                 "av",
                 "pyannote.audio",
                 "pyannote.core",
@@ -164,7 +184,6 @@ def build_server() -> None:
                 "torchcodec",
                 "faster-whisper",
                 "ctranslate2",
-                "tokenizers",
                 "funasr",
                 "modelscope",
                 "pyannote.audio",

@@ -4,12 +4,7 @@ import ast
 import json
 import re
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, List, Optional
-
-try:
-    from litellm import acompletion
-except Exception:  # pragma: no cover - handled at runtime for packaged installs
-    acompletion = None
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from .config import DATA_DIR
 from .vibearound import VibeAroundClient
@@ -18,6 +13,8 @@ from .vibearound import VibeAroundClient
 LLM_CONFIG_PATH = DATA_DIR / "llm_config.json"
 LLM_PROVIDER_VIBEAROUND = "vibearound"
 LLM_PROVIDER_LITELLM = "litellm"
+LiteLLMCompletion = Callable[..., Any]
+_litellm_acompletion: Optional[LiteLLMCompletion] = None
 
 
 class LLMConfigError(ValueError):
@@ -57,6 +54,19 @@ def friendly_llm_error(exc: BaseException) -> str:
     if raw == "LLM Provider NOT provided.":
         return "没有识别到模型接口类型，请检查模型接口设置。"
     return raw
+
+
+def _get_litellm_acompletion() -> LiteLLMCompletion:
+    global _litellm_acompletion
+    if _litellm_acompletion is not None:
+        return _litellm_acompletion
+    try:
+        from litellm import acompletion
+    except Exception as exc:  # pragma: no cover - depends on packaged runtime
+        detail = str(exc).strip() or exc.__class__.__name__
+        raise RuntimeError(f"模型接口依赖未安装，请重新安装应用依赖。缺失详情：{detail}") from exc
+    _litellm_acompletion = acompletion
+    return _litellm_acompletion
 
 
 def _default_config() -> Dict[str, Any]:
@@ -160,8 +170,7 @@ class LiteLLMClient:
         return ""
 
     async def chat(self, messages: List[Dict[str, str]], timeout: float = 90.0) -> str:
-        if acompletion is None:
-            raise RuntimeError("模型接口依赖未安装，请重新安装应用依赖。")
+        acompletion = _get_litellm_acompletion()
         response = await acompletion(**self._completion_kwargs(messages, timeout, stream=False))
         choice = self._first_choice(response)
         if choice is None:
@@ -177,8 +186,7 @@ class LiteLLMClient:
         messages: List[Dict[str, str]],
         timeout: float = 90.0,
     ) -> AsyncIterator[str]:
-        if acompletion is None:
-            raise RuntimeError("模型接口依赖未安装，请重新安装应用依赖。")
+        acompletion = _get_litellm_acompletion()
         response = await acompletion(**self._completion_kwargs(messages, timeout, stream=True))
         async for event in response:
             choice = self._first_choice(event)
