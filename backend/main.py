@@ -31,9 +31,11 @@ from .api.schemas import (
 from .asr import ASRUnavailable
 from .asr_runtime import ASRRuntime
 from .config import (
+    ASR_BACKENDS,
     ASR_MODEL,
     ASR_MODEL_DIR,
     PROJECT_DIR,
+    SPEAKER_MODES,
     ensure_runtime_dirs,
 )
 from .diarization import (
@@ -150,7 +152,7 @@ SUPPORTED_ASR_LANGUAGES = {
     "ru",
     "pt",
 }
-SUPPORTED_SPEAKER_MODES = {"voiceprint", "diarization", "off", "auto"}
+SUPPORTED_SPEAKER_MODES = set(SPEAKER_MODES) or {"voiceprint", "off"}
 
 
 def diarizer_for_mode(mode: str) -> Optional[PyannoteDiarizer]:
@@ -183,14 +185,12 @@ def resolve_asr_model(value: Optional[str]) -> str:
 
 def asr_catalog_groups() -> list[tuple[str, str, Dict[str, Dict[str, Any]]]]:
     groups: list[tuple[str, str, Dict[str, Dict[str, Any]]]] = []
-    if MAC_MLX_ENABLED:
+    if "mlx" in ASR_BACKENDS and MAC_MLX_ENABLED:
         groups.append(("mlx", "Apple MLX", MLX_ASR_MODEL_CATALOG))
-    groups.extend(
-        [
-            ("faster-whisper", "通用", ASR_MODEL_CATALOG),
-            ("funasr", "FunASR", FUNASR_MODEL_CATALOG),
-        ]
-    )
+    if "faster-whisper" in ASR_BACKENDS:
+        groups.append(("faster-whisper", "通用", ASR_MODEL_CATALOG))
+    if "funasr" in ASR_BACKENDS:
+        groups.append(("funasr", "FunASR", FUNASR_MODEL_CATALOG))
     return groups
 
 
@@ -228,7 +228,7 @@ def model_catalog() -> Dict[str, Any]:
         )
 
     pyannote_options = diarization_model_options(include_details=True)
-    pyannote_local_runtime = pyannote_runtime_status(pyannote_options[0])
+    pyannote_local_runtime = pyannote_runtime_status(pyannote_options[0]) if pyannote_options else {}
     return {
         "asr": {
             "model_dir": str(ASR_MODEL_DIR),
@@ -247,6 +247,8 @@ def model_catalog() -> Dict[str, Any]:
 
 
 def diarization_model_options(include_details: bool = False) -> list[Dict[str, Any]]:
+    if "diarization" not in SUPPORTED_SPEAKER_MODES and "auto" not in SUPPORTED_SPEAKER_MODES:
+        return []
     pyannote_path = local_pyannote_model_path()
     pyannote_installed = pyannote_path is not None
     pyannote_dependency = pyannote_audio_status()
@@ -343,6 +345,14 @@ def resolve_speaker_mode(value: Optional[str]) -> str:
     if mode not in SUPPORTED_SPEAKER_MODES:
         raise HTTPException(status_code=400, detail="当前说话人配置不可用。")
     return mode
+
+
+def speaker_mode_options() -> list[str]:
+    order = ("voiceprint", "diarization", "off", "auto")
+    return sorted(
+        SUPPORTED_SPEAKER_MODES,
+        key=lambda item: order.index(item) if item in order else 99,
+    )
 
 
 def chunk_sort_key(chunk: Dict[str, Any]) -> tuple[bool, int, int]:
@@ -661,7 +671,10 @@ async def start_model_download(payload: ModelDownloadRequest) -> Dict[str, Any]:
     model = (payload.model or "").strip()
     if kind == "asr" and model not in SUPPORTED_ASR_MODELS:
         raise HTTPException(status_code=400, detail="当前识别模型不可用。")
-    if kind == "diarization" and model != PYANNOTE_COMMUNITY_MODEL_ID:
+    if kind == "diarization" and (
+        model != PYANNOTE_COMMUNITY_MODEL_ID
+        or ("diarization" not in SUPPORTED_SPEAKER_MODES and "auto" not in SUPPORTED_SPEAKER_MODES)
+    ):
         raise HTTPException(status_code=400, detail="当前说话人分离模型不可用。")
     running = model_downloads.active_job(kind, model)
     if running:
@@ -693,7 +706,11 @@ async def delete_model(kind: str, model: str, force: bool = False) -> Dict[str, 
             if not force:
                 raise HTTPException(status_code=409, detail="识别模型正在使用，确认后才能删除。")
             asr_runtime.unload_model(clean_model)
-    elif clean_kind == "diarization" and clean_model == PYANNOTE_COMMUNITY_MODEL_ID:
+    elif (
+        clean_kind == "diarization"
+        and clean_model == PYANNOTE_COMMUNITY_MODEL_ID
+        and ("diarization" in SUPPORTED_SPEAKER_MODES or "auto" in SUPPORTED_SPEAKER_MODES)
+    ):
         diarization_loading = diarizer.loading or bool(local_pyannote_diarizer and local_pyannote_diarizer.loading)
         diarization_loaded = diarizer.loaded or bool(local_pyannote_diarizer and local_pyannote_diarizer.loaded)
         if diarization_loading:
@@ -1625,6 +1642,7 @@ def recording_config_response() -> Dict[str, Any]:
         "load_error": recording_model_load_error,
         "asr_options": asr_model_options(),
         "diarization_options": diarization_model_options(),
+        "speaker_mode_options": speaker_mode_options(),
     }
 
 

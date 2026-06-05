@@ -22,7 +22,7 @@ from .model_registry import (
 class ASRRuntime:
     def __init__(self, default_engine: Optional[FasterWhisperASR] = None) -> None:
         self.default_model = ASR_MODEL
-        self.default_engine = default_engine or FasterWhisperASR()
+        self.default_engine = default_engine or self._create_engine(self.default_model)
         self.engines: Dict[str, FasterWhisperASR] = {}
         self.load_lock = threading.Lock()
 
@@ -39,13 +39,18 @@ class ASRRuntime:
         return str((meta or {}).get("label") or model_name)
 
     def engine_for_model(self, model_name: str) -> FasterWhisperASR:
-        if model_name == self.default_engine.model_name and asr_model_backend(model_name) == "faster-whisper":
+        if model_name == self.default_model:
             return self.default_engine
 
         engine = self.engines.get(model_name)
         if engine is not None:
             return engine
 
+        engine = self._create_engine(model_name)
+        self.engines[model_name] = engine
+        return engine
+
+    def _create_engine(self, model_name: str) -> FasterWhisperASR:
         backend = asr_model_backend(model_name)
         if backend == "mlx":
             engine = MlxWhisperASR(
@@ -68,7 +73,6 @@ class ASRRuntime:
                     runtime_model = repo_id
                     break
             engine = FasterWhisperASR(model_name=runtime_model)
-        self.engines[model_name] = engine
         return engine
 
     def engine_status(self, model_name: str, engine: FasterWhisperASR) -> Dict[str, Any]:

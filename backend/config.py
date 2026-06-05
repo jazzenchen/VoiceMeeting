@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 from pathlib import Path
 from typing import Any, Optional
 
@@ -36,7 +37,19 @@ MEETINGS_DIR = DATA_DIR / "meetings"
 MODELS_DIR = Path(os.environ.get("VOICE_MEETING_MODELS_DIR", PROJECT_DIR / "models"))
 DB_PATH = Path(os.environ.get("VOICE_MEETING_DB", DATA_DIR / "voice_meeting.sqlite3"))
 
-ASR_MODEL = os.environ.get("VOICE_MEETING_ASR_MODEL", "small")
+
+def _csv_values(value: str) -> tuple[str, ...]:
+    return tuple(item.strip().lower() for item in value.split(",") if item.strip())
+
+
+APPLE_MLX_PLATFORM = platform.system() == "Darwin" and platform.machine().lower() in {"arm64", "aarch64"}
+DEFAULT_ASR_BACKENDS = "mlx" if APPLE_MLX_PLATFORM else "faster-whisper,funasr"
+ASR_BACKENDS = _csv_values(os.environ.get("VOICE_MEETING_ASR_BACKENDS", DEFAULT_ASR_BACKENDS))
+DEFAULT_SPEAKER_MODES = "voiceprint,off" if APPLE_MLX_PLATFORM else "voiceprint,diarization,off,auto"
+SPEAKER_MODES = _csv_values(os.environ.get("VOICE_MEETING_SPEAKER_MODES", DEFAULT_SPEAKER_MODES))
+DEFAULT_ASR_MODEL = "mlx-small" if "mlx" in ASR_BACKENDS and APPLE_MLX_PLATFORM else "small"
+
+ASR_MODEL = os.environ.get("VOICE_MEETING_ASR_MODEL", DEFAULT_ASR_MODEL)
 ASR_MODEL_DIR = Path(os.environ.get("VOICE_MEETING_ASR_MODEL_DIR", MODELS_DIR / "faster-whisper"))
 MLX_ASR_MODEL_DIR = Path(os.environ.get("VOICE_MEETING_MLX_ASR_MODEL_DIR", MODELS_DIR / "mlx-whisper"))
 FUNASR_MODEL_DIR = Path(os.environ.get("VOICE_MEETING_FUNASR_MODEL_DIR", MODELS_DIR / "funasr"))

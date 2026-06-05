@@ -45,6 +45,7 @@ export function SettingsDialog({
   asrModelGroups,
   modelCatalogByKey,
   recordingConfig,
+  speakerModeOptions,
   ensureRecordingModels,
   activeModelDownload,
   saveLlmConfig,
@@ -177,6 +178,7 @@ export function SettingsDialog({
                 asrModelGroups={asrModelGroups}
                 modelCatalogByKey={modelCatalogByKey}
                 recordingConfig={recordingConfig}
+                speakerModeOptions={speakerModeOptions}
                 ensureRecordingModels={ensureRecordingModels}
                 activeModelDownload={activeModelDownload}
               />
@@ -329,6 +331,7 @@ function RecordingSettingsPanel({
   asrModelGroups,
   modelCatalogByKey,
   recordingConfig,
+  speakerModeOptions,
   ensureRecordingModels,
   activeModelDownload,
 }) {
@@ -337,6 +340,9 @@ function RecordingSettingsPanel({
   const unavailableRecordingModels = missingRecordingModels.filter((item) => item.type === "unavailable");
   const noAsrModels = selectableAsrModels.length === 0;
   const diarizationMeta = modelCatalogByKey.get("diarization:pyannote-community-1");
+  const visibleSpeakerModeOptions = SPEAKER_MODE_OPTIONS.filter(([value]) => (
+    !Array.isArray(speakerModeOptions) || speakerModeOptions.length === 0 || speakerModeOptions.includes(value)
+  ));
   return (
     <form className="settings-panel" onSubmit={saveRecordingConfig}>
       <div className="settings-section-head">
@@ -415,7 +421,7 @@ function RecordingSettingsPanel({
             onChange={(event) => updateRecordingConfig("speakerMode", event.target.value)}
             disabled={recording}
           >
-            {SPEAKER_MODE_OPTIONS.map(([value, label]) => {
+            {visibleSpeakerModeOptions.map(([value, label]) => {
               const unavailable = value === "diarization"
                 && diarizationMeta?.installed
                 && diarizationMeta?.available === false;

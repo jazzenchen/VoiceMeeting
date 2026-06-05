@@ -3,10 +3,18 @@ from __future__ import annotations
 import argparse
 import os
 import platform
-import sys
 from pathlib import Path
 
 import PyInstaller.__main__
+
+
+def _is_apple_mlx_platform() -> bool:
+    return platform.system() == "Darwin" and platform.machine().lower() in {"arm64", "aarch64"}
+
+
+def _add_options(args: list[str], flag: str, values: list[str]) -> None:
+    for value in values:
+        args.extend([flag, value])
 
 
 def build_server() -> None:
@@ -45,17 +53,7 @@ def build_server() -> None:
         "--hidden-import",
         "uvicorn",
         "--hidden-import",
-        "faster_whisper",
-        "--hidden-import",
-        "ctranslate2",
-        "--hidden-import",
-        "tokenizers",
-        "--hidden-import",
         "huggingface_hub",
-        "--hidden-import",
-        "funasr",
-        "--hidden-import",
-        "modelscope",
         "--hidden-import",
         "resemblyzer",
         "--hidden-import",
@@ -67,59 +65,21 @@ def build_server() -> None:
         "--hidden-import",
         "torch",
         "--hidden-import",
-        "torchaudio",
-        "--hidden-import",
-        "torchcodec",
-        "--hidden-import",
-        "pyannote.audio",
-        "--hidden-import",
-        "pyannote.audio.pipelines",
-        "--collect-all",
-        "faster_whisper",
-        "--collect-all",
-        "ctranslate2",
-        "--collect-all",
-        "tokenizers",
-        "--collect-all",
-        "av",
+        "litellm",
         "--collect-all",
         "resemblyzer",
         "--collect-all",
         "imageio_ffmpeg",
-        "--collect-all",
-        "pyannote.audio",
-        "--collect-all",
-        "pyannote.core",
-        "--collect-all",
-        "pyannote.database",
-        "--collect-all",
-        "pyannote.pipeline",
-        "--copy-metadata",
-        "torchcodec",
-        "--copy-metadata",
-        "faster-whisper",
-        "--copy-metadata",
-        "ctranslate2",
-        "--copy-metadata",
-        "tokenizers",
         "--copy-metadata",
         "huggingface-hub",
-        "--copy-metadata",
-        "funasr",
-        "--copy-metadata",
-        "modelscope",
         "--copy-metadata",
         "resemblyzer",
         "--copy-metadata",
         "tqdm",
         "--copy-metadata",
-        "pyannote.audio",
+        "litellm",
         "--copy-metadata",
-        "pyannote.core",
-        "--copy-metadata",
-        "pyannote.database",
-        "--copy-metadata",
-        "pyannote.pipeline",
+        "openai",
         "--distpath",
         str(backend_dir / "dist"),
         "--workpath",
@@ -131,32 +91,87 @@ def build_server() -> None:
     if platform.system() == "Windows":
         args.append("--noconsole")
 
-    if platform.system() == "Darwin" and platform.machine().lower() in {"arm64", "aarch64"}:
-        args.extend(
+    if _is_apple_mlx_platform():
+        _add_options(args, "--hidden-import", ["mlx", "mlx.core", "mlx_whisper", "tiktoken"])
+        _add_options(args, "--collect-all", ["mlx", "mlx_whisper", "tiktoken", "regex"])
+        _add_options(args, "--copy-metadata", ["mlx", "mlx-whisper", "tiktoken"])
+        _add_options(
+            args,
+            "--exclude-module",
             [
-                "--hidden-import",
-                "mlx",
-                "--hidden-import",
-                "mlx.core",
-                "--hidden-import",
-                "mlx_whisper",
-                "--hidden-import",
-                "tiktoken",
-                "--collect-all",
-                "mlx",
-                "--collect-all",
-                "mlx_whisper",
-                "--collect-all",
-                "tiktoken",
-                "--collect-all",
-                "regex",
-                "--copy-metadata",
-                "mlx",
-                "--copy-metadata",
-                "mlx-whisper",
-                "--copy-metadata",
-                "tiktoken",
-            ]
+                "av",
+                "ctranslate2",
+                "faster_whisper",
+                "funasr",
+                "grpc",
+                "grpc_tools",
+                "hydra",
+                "lightning",
+                "lightning_fabric",
+                "matplotlib",
+                "modelscope",
+                "onnxruntime",
+                "pandas",
+                "PIL",
+                "pyannote",
+                "pyannote.audio",
+                "pyannote.core",
+                "pyannote.database",
+                "pyannote.pipeline",
+                "sklearn",
+                "sqlalchemy",
+                "sympy",
+                "tokenizers",
+                "torchcodec",
+                "torchaudio",
+                "transformers",
+            ],
+        )
+    else:
+        _add_options(
+            args,
+            "--hidden-import",
+            [
+                "faster_whisper",
+                "ctranslate2",
+                "tokenizers",
+                "funasr",
+                "modelscope",
+                "torchaudio",
+                "torchcodec",
+                "pyannote.audio",
+                "pyannote.audio.pipelines",
+            ],
+        )
+        _add_options(
+            args,
+            "--collect-all",
+            [
+                "faster_whisper",
+                "ctranslate2",
+                "tokenizers",
+                "av",
+                "pyannote.audio",
+                "pyannote.core",
+                "pyannote.database",
+                "pyannote.pipeline",
+            ],
+        )
+        _add_options(
+            args,
+            "--copy-metadata",
+            [
+                "torchcodec",
+                "faster-whisper",
+                "ctranslate2",
+                "tokenizers",
+                "funasr",
+                "modelscope",
+                "pyannote.audio",
+                "pyannote.core",
+                "pyannote.database",
+                "pyannote.pipeline",
+            ],
         )
 
     os.chdir(backend_dir)

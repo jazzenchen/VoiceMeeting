@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import json
-import platform
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .asr import MLX_MODEL_REPOS
-from .config import ASR_MODEL_DIR, FUNASR_MODEL_DIR, MLX_ASR_MODEL_DIR, MODELS_DIR
+from .config import APPLE_MLX_PLATFORM, ASR_BACKENDS, ASR_MODEL_DIR, FUNASR_MODEL_DIR, MLX_ASR_MODEL_DIR, MODELS_DIR
 
 
 ASR_MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
@@ -49,7 +48,7 @@ ASR_MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     },
 }
 
-MAC_MLX_ENABLED = platform.system() == "Darwin"
+MAC_MLX_ENABLED = APPLE_MLX_PLATFORM and "mlx" in ASR_BACKENDS
 MLX_ASR_MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     f"mlx-{name}": {
         "label": f"MLX {meta['label']}",
@@ -82,9 +81,11 @@ FUNASR_MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "repo_id": "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
     },
 }
-SUPPORTED_ASR_MODELS = set(ASR_MODEL_CATALOG) | (
-    set(MLX_ASR_MODEL_CATALOG) if MAC_MLX_ENABLED else set()
-) | set(FUNASR_MODEL_CATALOG)
+SUPPORTED_ASR_MODELS = (
+    (set(ASR_MODEL_CATALOG) if "faster-whisper" in ASR_BACKENDS else set())
+    | (set(MLX_ASR_MODEL_CATALOG) if MAC_MLX_ENABLED else set())
+    | (set(FUNASR_MODEL_CATALOG) if "funasr" in ASR_BACKENDS else set())
+)
 ASR_MODEL_REPOS = {
     "tiny": "Systran/faster-whisper-tiny",
     "base": "Systran/faster-whisper-base",

@@ -17,6 +17,7 @@ import {
   asrModelName,
   isUnrecognizedTranscriptItem,
   llmProviderLabel,
+  SPEAKER_MODE_OPTIONS,
   transcriptParts,
   transcriptVersionOption,
 } from "@/lib/meeting-display";
@@ -126,6 +127,7 @@ function App() {
   const [modelCatalog, setModelCatalog] = useState(null);
   const [recordingAsrOptions, setRecordingAsrOptions] = useState([]);
   const [recordingDiarizationOptions, setRecordingDiarizationOptions] = useState([]);
+  const [speakerModeOptions, setSpeakerModeOptions] = useState(() => SPEAKER_MODE_OPTIONS.map(([value]) => value));
   const [recordingConfig, setRecordingConfig] = useState(loadRecordingConfig);
   const [recordingConfigDraft, setRecordingConfigDraft] = useState(loadRecordingConfig);
   const [recordingConfigSaving, setRecordingConfigSaving] = useState(false);
@@ -346,8 +348,9 @@ function App() {
   );
   const asrModelGroups = useMemo(() => {
     const groups = [];
+    const supportedModels = ASR_MODEL_ORDER.filter((name) => modelCatalogByKey.has(`asr:${name}`));
     for (const backend of ["mlx", "faster-whisper", "funasr"]) {
-      const models = ASR_MODEL_ORDER.filter((name) => {
+      const models = supportedModels.filter((name) => {
         const meta = modelCatalogByKey.get(`asr:${name}`);
         return (meta?.backend || asrBackendForModel(name)) === backend;
       });
@@ -359,7 +362,7 @@ function App() {
       }
     }
     const grouped = new Set(groups.flatMap((group) => group.models));
-    const remaining = ASR_MODEL_ORDER.filter((name) => !grouped.has(name));
+    const remaining = supportedModels.filter((name) => !grouped.has(name));
     if (remaining.length > 0) {
       groups.push({ label: "其他模型", models: remaining });
     }
@@ -550,6 +553,7 @@ function App() {
     }
     if (Array.isArray(data.asr_options)) setRecordingAsrOptions(data.asr_options);
     if (Array.isArray(data.diarization_options)) setRecordingDiarizationOptions(data.diarization_options);
+    if (Array.isArray(data.speaker_mode_options)) setSpeakerModeOptions(data.speaker_mode_options);
     setModelStatus(data.asr || null);
     if (data.llm) {
       applyLlmStatus(data.llm);
@@ -2727,6 +2731,7 @@ function App() {
         asrModelGroups={asrModelGroups}
         modelCatalogByKey={modelCatalogByKey}
         recordingConfig={recordingConfigDraft}
+        speakerModeOptions={speakerModeOptions}
         ensureRecordingModels={ensureRecordingModels}
         activeModelDownload={activeModelDownload}
         saveLlmConfig={saveLlmConfig}

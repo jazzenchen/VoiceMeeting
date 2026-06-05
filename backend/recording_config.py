@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 import json
-import platform
 from pathlib import Path
 from typing import Any, Dict
 
-from .config import ASR_MODEL, DATA_DIR
+from .config import ASR_MODEL, DATA_DIR, SPEAKER_MODES
+from .model_registry import SUPPORTED_ASR_MODELS
 
 
 RECORDING_CONFIG_PATH = DATA_DIR / "recording_config.json"
 
 DEFAULT_RECORDING_CONFIG: Dict[str, Any] = {
     "language": "mixed",
-    "asr_model": "mlx-small" if platform.system() == "Darwin" else ASR_MODEL,
+    "asr_model": ASR_MODEL,
     "speaker_mode": "voiceprint",
     "max_segment_ms": 15000,
     "input_gain": 1.0,
@@ -32,7 +32,7 @@ SUPPORTED_LANGUAGES = {
     "ru",
     "pt",
 }
-SUPPORTED_SPEAKER_MODES = {"voiceprint", "diarization", "off", "auto"}
+SUPPORTED_SPEAKER_MODES = set(SPEAKER_MODES) or {"voiceprint", "off"}
 
 
 def clamp_recording_config(value: Dict[str, Any]) -> Dict[str, Any]:
@@ -50,7 +50,7 @@ def clamp_recording_config(value: Dict[str, Any]) -> Dict[str, Any]:
         input_gain = float(DEFAULT_RECORDING_CONFIG["input_gain"])
     return {
         "language": language if language in SUPPORTED_LANGUAGES else DEFAULT_RECORDING_CONFIG["language"],
-        "asr_model": asr_model or DEFAULT_RECORDING_CONFIG["asr_model"],
+        "asr_model": asr_model if asr_model in SUPPORTED_ASR_MODELS else DEFAULT_RECORDING_CONFIG["asr_model"],
         "speaker_mode": speaker_mode if speaker_mode in SUPPORTED_SPEAKER_MODES else DEFAULT_RECORDING_CONFIG["speaker_mode"],
         "max_segment_ms": min(30000, max(8000, max_segment_ms)),
         "input_gain": min(2.5, max(0.8, input_gain)),
