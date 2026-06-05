@@ -181,16 +181,23 @@ def resolve_asr_model(value: Optional[str]) -> str:
     return model_name
 
 
+def asr_catalog_groups() -> list[tuple[str, str, Dict[str, Dict[str, Any]]]]:
+    groups: list[tuple[str, str, Dict[str, Dict[str, Any]]]] = []
+    if MAC_MLX_ENABLED:
+        groups.append(("mlx", "Apple MLX", MLX_ASR_MODEL_CATALOG))
+    groups.extend(
+        [
+            ("faster-whisper", "通用", ASR_MODEL_CATALOG),
+            ("funasr", "FunASR", FUNASR_MODEL_CATALOG),
+        ]
+    )
+    return groups
+
+
 def model_catalog() -> Dict[str, Any]:
     installed_asr = discovered_asr_models()
     asr_models = []
-    catalog_groups: list[tuple[str, str, Dict[str, Dict[str, Any]]]] = [
-        ("faster-whisper", "通用", ASR_MODEL_CATALOG),
-        ("funasr", "FunASR", FUNASR_MODEL_CATALOG),
-    ]
-    if MAC_MLX_ENABLED:
-        catalog_groups.append(("mlx", "Apple MLX", MLX_ASR_MODEL_CATALOG))
-    for backend, backend_label, catalog in catalog_groups:
+    for backend, backend_label, catalog in asr_catalog_groups():
         for name, meta in catalog.items():
             path = asr_model_cache_path(name)
             installed = name in installed_asr
@@ -299,13 +306,7 @@ def pyannote_runtime_status(model_option: Dict[str, Any]) -> Dict[str, Any]:
 def asr_model_options() -> list[Dict[str, Any]]:
     options: list[Dict[str, Any]] = []
     installed_models = set(discovered_asr_models())
-    catalog_groups: list[tuple[str, str, Dict[str, Dict[str, Any]]]] = [
-        ("faster-whisper", "通用", ASR_MODEL_CATALOG),
-        ("funasr", "FunASR", FUNASR_MODEL_CATALOG),
-    ]
-    if MAC_MLX_ENABLED:
-        catalog_groups.append(("mlx", "Apple MLX", MLX_ASR_MODEL_CATALOG))
-    for backend, backend_label, catalog in catalog_groups:
+    for backend, backend_label, catalog in asr_catalog_groups():
         for name, meta in catalog.items():
             options.append(
                 {

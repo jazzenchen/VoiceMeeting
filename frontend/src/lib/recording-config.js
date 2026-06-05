@@ -4,7 +4,7 @@ export const MAX_SEGMENT_MS = 15000;
 export const FASTER_ASR_MODEL_ORDER = ["tiny", "base", "small", "medium", "large-v3-turbo", "large-v3"];
 export const MLX_ASR_MODEL_ORDER = FASTER_ASR_MODEL_ORDER.map((model) => `mlx-${model}`);
 export const FUNASR_MODEL_ORDER = ["funasr-sensevoice-small", "funasr-paraformer-zh"];
-export const ASR_MODEL_ORDER = [...FASTER_ASR_MODEL_ORDER, ...MLX_ASR_MODEL_ORDER, ...FUNASR_MODEL_ORDER];
+export const ASR_MODEL_ORDER = [...MLX_ASR_MODEL_ORDER, ...FASTER_ASR_MODEL_ORDER, ...FUNASR_MODEL_ORDER];
 
 export const DEFAULT_RECORDING_CONFIG = {
   language: "mixed",

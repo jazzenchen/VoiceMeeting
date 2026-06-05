@@ -346,7 +346,7 @@ function App() {
   );
   const asrModelGroups = useMemo(() => {
     const groups = [];
-    for (const backend of ["faster-whisper", "mlx", "funasr"]) {
+    for (const backend of ["mlx", "faster-whisper", "funasr"]) {
       const models = ASR_MODEL_ORDER.filter((name) => {
         const meta = modelCatalogByKey.get(`asr:${name}`);
         return (meta?.backend || asrBackendForModel(name)) === backend;
@@ -367,7 +367,7 @@ function App() {
   }, [modelCatalogByKey]);
   const modelCatalogAsrGroups = useMemo(() => {
     const groups = [];
-    for (const backend of ["faster-whisper", "mlx", "funasr"]) {
+    for (const backend of ["mlx", "faster-whisper", "funasr"]) {
       const models = modelCatalogAsr.filter((item) => item.backend === backend);
       if (models.length > 0) {
         groups.push({
