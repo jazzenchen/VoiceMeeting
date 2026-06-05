@@ -7,8 +7,6 @@ import {
   assistantStatusText,
   formatOffset,
   meetingStatusName,
-  progressPercent,
-  runtimeLine,
   serviceStatusText,
   speakerModeName,
 } from "@/lib/meeting-display";
@@ -29,20 +27,30 @@ function serviceCompactText(value) {
 }
 
 function asrStatusText(modelStatus, recognitionUnavailableReason, t) {
-  if (recognitionUnavailableReason) return t(recognitionUnavailableReason);
+  if (recognitionUnavailableReason) return "";
   if (!modelStatus) return "";
   const model = modelStatus.label
     || asrModelName(modelStatus.model || modelStatus.runtime_model || modelStatus.configured_model || "");
   if (modelStatus.loading) {
-    return model ? `${t("文字识别")} · ${model} ${t("加载中")}` : `${t("文字识别")} · ${t("加载中")}`;
+    return "";
   }
   if (modelStatus.loaded) {
-    return model ? `${t("文字识别")} · ${model}` : "";
+    return model ? `${t("文字识别")} · ${t(model)}` : "";
   }
   if (modelStatus.last_error || modelStatus.load_error) {
     return `${t("文字识别")} · ${t("模型加载失败")}`;
   }
-  return model ? `${t("文字识别")} · ${model}` : "";
+  return model ? `${t("文字识别")} · ${t(model)}` : "";
+}
+
+function assistantCompactText(llmStatus, t) {
+  const text = compactStatusText(assistantStatusText(llmStatus));
+  const litellm = text.match(/^LLM 模型接口\s*·\s*(.*)$/u);
+  if (litellm) {
+    const suffix = litellm[1] === "需要配置" ? t("需配置") : litellm[1];
+    return `${t("LLM 模型接口")} ${suffix}`.trim();
+  }
+  return t(text);
 }
 
 function assistantPillClass(llmStatus, fallbackClass) {
@@ -68,11 +76,6 @@ export function TopBar({
   modelStatus,
   recognitionUnavailableReason,
   servicePillClass,
-  asrWorking,
-  runtimeStatus,
-  pendingChunks,
-  activeModelDownload,
-  activeModelDownloadMeta,
   recording,
   speakerMode,
   micLevel,
@@ -98,7 +101,8 @@ export function TopBar({
       .map((item) => item?.speaker)
       .filter(Boolean),
   ).size;
-  const asrPillText = asrStatusText(modelStatus, recognitionUnavailableReason, t);
+  const serviceReady = status?.backend === "ready";
+  const asrPillText = serviceReady ? asrStatusText(modelStatus, recognitionUnavailableReason, t) : "";
   const asrPillClass = recognitionUnavailableReason
     ? "warning"
     : modelStatus?.loading
@@ -129,16 +133,8 @@ export function TopBar({
           {asrPillText && <span className={`pill ${asrPillClass}`} title={asrPillText}>{asrPillText}</span>}
           <span className="pill ready">{speakerModeText}</span>
           <span className={`pill ${assistantPillClass(llmStatus, status.vibe)}`}>
-            {compactStatusText(assistantStatusText(llmStatus)).replace(/^LLM 模型接口\s*·\s*/u, "LLM 模型接口 ")}
+            {assistantCompactText(llmStatus, t)}
           </span>
-          {asrWorking && <span className="pill working pulse-pill">{runtimeLine(runtimeStatus, pendingChunks, t)}</span>}
-          {activeModelDownload && (
-            <span className="pill working">
-              {activeModelDownload.status === "cancelling"
-                ? t("模型取消中")
-                : `${activeModelDownloadMeta?.label || t("模型")} ${progressPercent(activeModelDownload)}%`}
-            </span>
-          )}
           {recording && (
             <span className="pill wave-pill" title={t("麦克风电平")}>
               <span className="mini-wave" style={{ "--level": micLevel }}>
@@ -151,7 +147,6 @@ export function TopBar({
               </span>
             </span>
           )}
-            {pendingChunks > 0 && <span className="pill working">{t("待处理 {count}", { count: pendingChunks })}</span>}
         </div>
         <Button
           type="button"

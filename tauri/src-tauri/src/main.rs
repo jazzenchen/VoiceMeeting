@@ -290,14 +290,6 @@ fn start_server(app: &tauri::AppHandle) -> Result<String, String> {
     let state = app.state::<ServerState>();
     set_server_status(&state, "starting", "");
 
-    if health_body().is_some() {
-        println!(
-            "Existing server on {}; restarting owned VoiceMeeting sidecar",
-            server_url()
-        );
-    }
-    terminate_port_processes();
-
     let app_data_dir = app
         .path()
         .app_data_dir()
@@ -314,6 +306,26 @@ fn start_server(app: &tauri::AppHandle) -> Result<String, String> {
         .map_err(|error| format!("Failed to create data directory: {error}"))?;
     std::fs::create_dir_all(&models_dir)
         .map_err(|error| format!("Failed to create models directory: {error}"))?;
+
+    #[cfg(debug_assertions)]
+    {
+        if wait_for_health(Duration::from_secs(30)) {
+            println!(
+                "Using existing VoiceMeeting development server: {}",
+                server_url()
+            );
+            set_server_status(&state, "ready", "");
+            return Ok(server_url());
+        }
+    }
+
+    if health_body().is_some() {
+        println!(
+            "Existing server on {}; restarting owned VoiceMeeting sidecar",
+            server_url()
+        );
+    }
+    terminate_port_processes();
 
     println!("Starting VoiceMeeting sidecar");
     println!("Data directory: {:?}", data_dir);

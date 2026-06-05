@@ -3,11 +3,11 @@ import { AudioMergeDialog } from "@/components/meeting/AudioMergeDialog";
 import { DeleteMeetingDialog } from "@/components/meeting/DeleteMeetingDialog";
 import { MeetingTimeline } from "@/components/meeting/MeetingTimeline";
 import { MeetingPropertiesDialog } from "@/components/meeting/MeetingPropertiesDialog";
-import { ModelLoadDialog } from "@/components/meeting/ModelLoadDialog";
 import { NotesPane } from "@/components/meeting/NotesPane";
 import { SettingsDialog } from "@/components/meeting/SettingsDialog";
 import { Sidebar } from "@/components/meeting/Sidebar";
 import { StartupBanner } from "@/components/meeting/StartupBanner";
+import { StartupSplash } from "@/components/meeting/StartupSplash";
 import { TopBar } from "@/components/meeting/TopBar";
 import { TranscriptPane } from "@/components/meeting/TranscriptPane";
 import { clampAppearance, loadAppearance, saveAppearance } from "@/lib/appearance";
@@ -156,7 +156,6 @@ function App() {
   const [liveRecordingMs, setLiveRecordingMs] = useState(0);
   const [importingAudio, setImportingAudio] = useState(false);
   const [downloadBusy, setDownloadBusy] = useState("");
-  const [modelLoadState, setModelLoadState] = useState(null);
   const [playing, setPlaying] = useState(false);
   const [playbackBusy, setPlaybackBusy] = useState(false);
   const [playbackStatus, setPlaybackStatus] = useState("未播放");
@@ -180,6 +179,12 @@ function App() {
   const [status, setStatus] = useState({ backend: "starting", vibe: "checking" });
   const [appearance, setAppearance] = useState(loadAppearance);
   const [locale, setLocale] = useState(loadLocale);
+  const [configuredModelLoaded, setConfiguredModelLoaded] = useState(false);
+  const [recordingModelLoadError, setRecordingModelLoadError] = useState("");
+  const [startupDataLoaded, setStartupDataLoaded] = useState(false);
+  const [startupDataLoading, setStartupDataLoading] = useState(false);
+  const [startupDataError, setStartupDataError] = useState("");
+  const [startupComplete, setStartupComplete] = useState(false);
 
   const streamRef = useRef(null);
   const audioContextRef = useRef(null);
@@ -391,9 +396,6 @@ function App() {
     job?.status === "queued" || job?.status === "running" || job?.status === "cancelling"
   ));
   const latestModelDownload = (modelCatalog?.downloads || [])[0] || null;
-  const activeModelDownloadMeta = activeModelDownload
-    ? modelCatalogByKey.get(`${activeModelDownload.kind}:${activeModelDownload.model}`)
-    : null;
   const loadingAsrModelMeta = modelCatalogAsr.find((item) => item.loading) || null;
   const activeChunks = displayRuntimeStatus?.active_chunks || [];
   const reprocessRuntime = runtimeStatus?.reprocess || null;
@@ -407,8 +409,7 @@ function App() {
   const selectedAsrModelMeta = modelCatalogByKey.get(`asr:${normalizedRecordingConfig.asrModel}`);
   const serviceReady = status.backend === "ready";
   const serviceStarting = status.backend === "starting" || status.backend === "checking";
-  const modelLoadBusy = modelLoadState?.status === "loading";
-  const modelRuntimeBusy = modelLoadBusy || Boolean(loadingAsrModelMeta) || Boolean(modelStatus?.loading);
+  const modelRuntimeBusy = Boolean(loadingAsrModelMeta) || Boolean(modelStatus?.loading);
   const llmReady = status.vibe === "ready";
   const llmUnavailableReason = llmReady ? "" : status.vibeDetail || "会议助手不可用，请在设置里配置纪要大模型。";
   const selectedAsrModelLoaded = Boolean(selectedAsrModelMeta?.loaded)
@@ -432,6 +433,14 @@ function App() {
   const servicePillClass = serviceStarting ? "working pulse-pill" : status.backend;
   const trimmedTitle = title.trim();
   const titleDirty = Boolean(meeting?.id && trimmedTitle && trimmedTitle !== meeting.title);
+  const startupModelLoading = (
+    serviceReady
+    && startupDataLoaded
+    && !configuredModelLoaded
+    && !recordingModelLoadError
+  );
+  const startupReady = serviceReady && startupDataLoaded && !startupDataLoading && !startupModelLoading;
+  const startupError = startupDataError || (!serviceReady && status.backend === "error" ? status.backendDetail : "");
 
   useEffect(() => {
     const normalized = clampRecordingConfig(recordingConfig);
@@ -554,6 +563,10 @@ function App() {
     if (Array.isArray(data.asr_options)) setRecordingAsrOptions(data.asr_options);
     if (Array.isArray(data.diarization_options)) setRecordingDiarizationOptions(data.diarization_options);
     if (Array.isArray(data.speaker_mode_options)) setSpeakerModeOptions(data.speaker_mode_options);
+    if (typeof data.configured_model_loaded === "boolean") {
+      setConfiguredModelLoaded(data.configured_model_loaded);
+    }
+    setRecordingModelLoadError(data.load_error || "");
     setModelStatus(data.asr || null);
     if (data.llm) {
       applyLlmStatus(data.llm);
@@ -588,10 +601,37 @@ function App() {
     try {
       const data = await api("/api/meetings");
       setMeetings(data.meetings || []);
-    } catch {
-      setMeetings([]);
+    } catch (err) {
+      setError(userFriendlyError(err.message));
     }
   }, []);
+
+  const loadStartupData = useCallback(async () => {
+    if (!serviceReady) return;
+    setStartupDataLoading(true);
+    setStartupDataError("");
+    try {
+      const [recordingData, meetingsData] = await Promise.all([
+        api("/api/recording-config"),
+        api("/api/meetings"),
+      ]);
+      applyRecordingConfigStatus(recordingData);
+      setMeetings(meetingsData.meetings || []);
+      setStartupDataLoaded(true);
+    } catch (err) {
+      setStartupDataError(userFriendlyError(err.message));
+    } finally {
+      setStartupDataLoading(false);
+    }
+  }, [applyRecordingConfigStatus, serviceReady]);
+
+  const retryStartup = useCallback(() => {
+    setStartupDataLoaded(false);
+    setStartupDataError("");
+    if (serviceReady) {
+      loadStartupData();
+    }
+  }, [loadStartupData, serviceReady]);
 
   const refreshMeeting = useCallback(async (id) => {
     if (!id) return;
@@ -816,21 +856,10 @@ function App() {
   const saveRecordingConfig = useCallback(async (event) => {
     event.preventDefault();
     if (recordingConfigSaving || recording) return;
-    const current = clampRecordingConfig(recordingConfigRef.current);
     const next = clampRecordingConfig(recordingConfigDraft);
-    const modelChanged = next.asrModel !== current.asrModel;
     setRecordingConfigSaving(true);
     setRecordingConfigError("");
     setError("");
-    if (modelChanged) {
-      setModelLoadState({
-        status: "loading",
-        source: "settings",
-        targetModel: next.asrModel,
-        targetLabel: asrModelName(next.asrModel),
-        previousLabel: asrModelName(current.asrModel),
-      });
-    }
     try {
       if (selectedMicDraftId !== selectedMicId) {
         selectMicDevice(selectedMicDraftId);
@@ -844,29 +873,10 @@ function App() {
       const saved = data.config ? recordingConfigFromServer(data.config) : next;
       setRecordingConfigDraft(saved);
       setPipelineStatus("录制配置已保存");
-      if (modelChanged) {
-        setModelLoadState({
-          status: "success",
-          source: "settings",
-          targetModel: next.asrModel,
-          targetLabel: asrModelName(next.asrModel),
-          previousLabel: asrModelName(current.asrModel),
-        });
-      }
     } catch (err) {
       const message = userFriendlyError(err.message);
       setRecordingConfigError(message);
       setError(message);
-      if (modelChanged) {
-        setModelLoadState({
-          status: "error",
-          source: "settings",
-          targetModel: next.asrModel,
-          targetLabel: asrModelName(next.asrModel),
-          previousLabel: asrModelName(current.asrModel),
-          error: message,
-        });
-      }
     } finally {
       setRecordingConfigSaving(false);
     }
@@ -1446,8 +1456,14 @@ function App() {
   );
 
   useEffect(() => {
-    refreshMeetings();
-  }, [refreshMeetings]);
+    if (!serviceReady || startupDataLoaded || startupDataLoading) return;
+    loadStartupData();
+  }, [loadStartupData, serviceReady, startupDataLoaded, startupDataLoading]);
+
+  useEffect(() => {
+    if (startupComplete || !startupReady) return;
+    setStartupComplete(true);
+  }, [startupComplete, startupReady]);
 
   useEffect(() => {
     const job = runtimeStatus?.reprocess;
@@ -2364,7 +2380,6 @@ function App() {
         || settingsOpen
         || propertiesOpen
         || Boolean(deleteTarget)
-        || Boolean(modelLoadState)
         || Boolean(audioMergeState)
       ) {
         return;
@@ -2379,7 +2394,6 @@ function App() {
     audioMergeState,
     deleteTarget,
     meeting?.id,
-    modelLoadState,
     playMeeting,
     playbackBusy,
     propertiesOpen,
@@ -2563,6 +2577,17 @@ function App() {
   return (
     <I18nProvider locale={locale}>
     <div className="app-shell" data-theme={appearance.theme} data-palette={appearance.palette} data-locale={locale}>
+      {!startupComplete ? (
+        <StartupSplash
+          backendStatus={status.backend}
+          backendDetail={status.backendDetail}
+          dataLoading={startupDataLoading || !startupDataLoaded}
+          modelLoading={startupModelLoading}
+          error={startupError}
+          onRetry={retryStartup}
+        />
+      ) : (
+        <>
       <Sidebar
         meeting={meeting}
         meetings={meetings}
@@ -2619,11 +2644,6 @@ function App() {
           modelStatus={modelStatus}
           recognitionUnavailableReason={asrUnavailableReason}
           servicePillClass={servicePillClass}
-          asrWorking={asrWorking}
-          runtimeStatus={displayRuntimeStatus}
-          pendingChunks={pendingChunks}
-          activeModelDownload={activeModelDownload}
-          activeModelDownloadMeta={activeModelDownloadMeta}
           recording={recording}
           speakerMode={normalizedRecordingConfig.speakerMode}
           micLevel={micLevel}
@@ -2726,7 +2746,7 @@ function App() {
         recordingConfigSaving={recordingConfigSaving}
         recordingConfigDirty={recordingConfigDirty}
         recordingConfigError={recordingConfigError}
-        modelLoading={modelLoadState?.status === "loading" || recordingConfigSaving}
+        modelLoading={Boolean(modelStatus?.loading) || recordingConfigSaving}
         selectableAsrModels={selectableAsrModels}
         asrModelGroups={asrModelGroups}
         modelCatalogByKey={modelCatalogByKey}
@@ -2777,11 +2797,8 @@ function App() {
       />
 
       <AudioMergeDialog state={audioMergeState} />
-
-      <ModelLoadDialog
-        state={modelLoadState}
-        onClose={() => setModelLoadState(null)}
-      />
+        </>
+      )}
     </div>
     </I18nProvider>
   );

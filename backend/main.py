@@ -1631,6 +1631,10 @@ def configured_asr_loaded(model_name: str) -> bool:
     return asr_runtime.is_loaded(model_name)
 
 
+def configured_asr_loading(model_name: str) -> bool:
+    return bool(asr_runtime.model_runtime_flags(model_name).get("loading"))
+
+
 def recording_config_response() -> Dict[str, Any]:
     config = recording_config.read()
     return {
@@ -1679,14 +1683,18 @@ async def app_status_response() -> Dict[str, Any]:
     }
 
 
-async def load_recording_model_from_config() -> None:
+async def load_recording_model_from_config(model_name: Optional[str] = None) -> None:
     global recording_model_load_error
     config = recording_config.read()
+    requested_model = model_name or config["asr_model"]
     try:
-        await asyncio.to_thread(asr_runtime.load_model_sync, config["asr_model"])
-        recording_model_load_error = ""
+        requested_model = normalize_asr_model(requested_model)
+        await asyncio.to_thread(asr_runtime.load_model_sync, requested_model)
+        if recording_config.read().get("asr_model") == requested_model:
+            recording_model_load_error = ""
     except Exception as exc:
-        recording_model_load_error = str(exc)
+        if recording_config.read().get("asr_model") == requested_model:
+            recording_model_load_error = str(exc)
 
 
 @app.on_event("startup")
@@ -1710,13 +1718,8 @@ async def update_recording_config(payload: RecordingConfigRequest) -> Dict[str, 
     model_changed = requested_model != current.get("asr_model")
     needs_load = model_changed or not configured_asr_loaded(requested_model)
     recording_config.save(next_config)
-    try:
-        if needs_load:
-            await asyncio.to_thread(asr_runtime.load_model_sync, requested_model)
-        recording_model_load_error = ""
-    except Exception as exc:
-        recording_model_load_error = str(exc)
-        raise HTTPException(status_code=500, detail=f"模型加载失败：{exc}")
+    if needs_load and not configured_asr_loading(requested_model):
+        asyncio.create_task(load_recording_model_from_config(requested_model))
     return recording_config_response()
 
 

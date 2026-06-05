@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import threading
+import time
 from typing import Any, Dict, Optional
 
 from .asr import ASRUnavailable, FasterWhisperASR, FunASRASR, MlxWhisperASR
@@ -17,6 +19,8 @@ from .model_registry import (
     discovered_asr_models,
     mark_funasr_model_installed,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ASRRuntime:
@@ -136,7 +140,14 @@ class ASRRuntime:
                 })
 
             engine = self.engine_for_model(requested_model)
+            started_at = time.monotonic()
             engine.load()
+            logger.info(
+                "Loaded ASR model %s (%s) in %.2fs",
+                requested_model,
+                self.model_label(requested_model),
+                time.monotonic() - started_at,
+            )
             if asr_model_backend(requested_model) == "funasr":
                 mark_funasr_model_installed(requested_model)
             return {
