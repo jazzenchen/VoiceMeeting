@@ -21,7 +21,7 @@ from .config import (
     FUNASR_MODEL_DIR,
     MLX_ASR_MODEL_DIR,
 )
-from .media_tools import ffmpeg_path
+from .media_tools import ffmpeg_path, prepare_ffmpeg_path
 
 
 SAMPLE_RATE = 16000
@@ -78,6 +78,45 @@ MLX_MODEL_REPOS = {
 
 class ASRUnavailable(RuntimeError):
     pass
+
+
+def patch_mlx_whisper_audio_loader(mlx_whisper: Any) -> None:
+    ffmpeg = prepare_ffmpeg_path()
+    if not ffmpeg:
+        raise ASRUnavailable("ffmpeg is required for mlx-whisper audio decoding.")
+
+    mlx_audio = mlx_whisper.audio
+    if getattr(mlx_audio.load_audio, "_voice_meeting_ffmpeg", "") == ffmpeg:
+        return
+
+    def load_audio(file: str = "", sr: int = mlx_audio.SAMPLE_RATE, from_stdin: bool = False):
+        if from_stdin:
+            command = [ffmpeg, "-i", "pipe:0"]
+        else:
+            command = [ffmpeg, "-nostdin", "-i", file]
+        command.extend([
+            "-threads",
+            "0",
+            "-f",
+            "s16le",
+            "-ac",
+            "1",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            str(sr),
+            "-",
+        ])
+        try:
+            output = subprocess.run(command, capture_output=True, check=True).stdout
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(f"Failed to load audio: {exc.stderr.decode()}") from exc
+        return mlx_audio.mx.array(mlx_audio.np.frombuffer(output, mlx_audio.np.int16)).flatten().astype(
+            mlx_audio.mx.float32
+        ) / 32768.0
+
+    load_audio._voice_meeting_ffmpeg = ffmpeg  # type: ignore[attr-defined]
+    mlx_audio.load_audio = load_audio
 
 
 class FasterWhisperASR:
@@ -158,6 +197,7 @@ class FasterWhisperASR:
         return self._model
 
     def convert_to_wav(self, source: Path, destination: Path) -> None:
+        prepare_ffmpeg_path()
         ffmpeg = ffmpeg_path()
         if ffmpeg is None:
             raise ASRUnavailable("ffmpeg is required for audio chunk conversion.")
@@ -593,6 +633,7 @@ class MlxWhisperASR(FasterWhisperASR):
                 "mlx-whisper is not installed. Install the macOS MLX backend first."
             ) from exc
 
+        patch_mlx_whisper_audio_loader(mlx_whisper)
         result = mlx_whisper.transcribe(
             str(wav_path),
             path_or_hf_repo=self._runtime_model_path(),

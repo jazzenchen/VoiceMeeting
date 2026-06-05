@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 from functools import lru_cache
+from pathlib import Path
 from typing import Optional
 
 
@@ -22,6 +23,17 @@ def ffmpeg_path() -> Optional[str]:
         return imageio_ffmpeg.get_ffmpeg_exe()
     except Exception:
         return None
+
+
+@lru_cache(maxsize=1)
+def prepare_ffmpeg_path() -> Optional[str]:
+    path = ffmpeg_path()
+    if not path:
+        return None
+
+    resolved = Path(path)
+    os.environ.setdefault("IMAGEIO_FFMPEG_EXE", str(resolved))
+    return str(resolved)
 
 
 @lru_cache(maxsize=1)

@@ -900,6 +900,7 @@ function App() {
         const saved = await api("/api/llm/config", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
+          timeoutMs: 15000,
           body: JSON.stringify({
             provider: llmConfigDraft.provider,
             litellm: {

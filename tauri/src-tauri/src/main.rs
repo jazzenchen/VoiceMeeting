@@ -5,6 +5,8 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use tauri::{Manager, RunEvent};
 
 const SERVER_PORT: u16 = 8788;
@@ -238,11 +240,29 @@ fn terminate_port_processes() {
 
     let text = String::from_utf8_lossy(&output.stdout);
     for pid in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        println!("Stopping stale process on VoiceMeeting port {} pid={}", SERVER_PORT, pid);
+        println!(
+            "Stopping stale process on VoiceMeeting port {} pid={}",
+            SERVER_PORT, pid
+        );
         let _ = Command::new("kill").args(["-TERM", pid]).output();
     }
 
     std::thread::sleep(Duration::from_millis(700));
+
+    for pid in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if Command::new("kill")
+            .args(["-0", pid])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+        {
+            println!(
+                "Force-stopping stale process on VoiceMeeting port {} pid={}",
+                SERVER_PORT, pid
+            );
+            let _ = Command::new("kill").args(["-KILL", pid]).output();
+        }
+    }
 }
 
 #[cfg(not(unix))]
@@ -270,16 +290,13 @@ fn start_server(app: &tauri::AppHandle) -> Result<String, String> {
     let state = app.state::<ServerState>();
     set_server_status(&state, "starting", "");
 
-    if health_body().as_ref().is_some_and(compatible_health) {
-        println!("Reusing existing VoiceMeeting server on {}", server_url());
-        set_server_status(&state, "ready", "");
-        return Ok(server_url());
-    }
-
     if health_body().is_some() {
-        println!("Existing server on {} is incompatible; restarting VoiceMeeting sidecar", server_url());
-        terminate_port_processes();
+        println!(
+            "Existing server on {}; restarting owned VoiceMeeting sidecar",
+            server_url()
+        );
     }
+    terminate_port_processes();
 
     let app_data_dir = app
         .path()
@@ -347,6 +364,11 @@ fn start_server(app: &tauri::AppHandle) -> Result<String, String> {
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    #[cfg(unix)]
+    {
+        command.process_group(0);
+    }
 
     let mut child = command.spawn().map_err(|error| {
         let message = format!("Failed to spawn VoiceMeeting server: {error}");
@@ -432,7 +454,20 @@ fn stop_server(state: &ServerState) {
         println!("Stopping VoiceMeeting server pid={}", pid);
         #[cfg(unix)]
         {
-            let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).output();
+            let pid_string = pid.to_string();
+            let group_string = format!("-{pid}");
+            let _ = Command::new("kill").args(["-TERM", &group_string]).output();
+            let _ = Command::new("kill").args(["-TERM", &pid_string]).output();
+            std::thread::sleep(Duration::from_millis(700));
+            if Command::new("kill")
+                .args(["-0", &group_string])
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false)
+            {
+                let _ = Command::new("kill").args(["-KILL", &group_string]).output();
+                let _ = Command::new("kill").args(["-KILL", &pid_string]).output();
+            }
         }
         #[cfg(windows)]
         {

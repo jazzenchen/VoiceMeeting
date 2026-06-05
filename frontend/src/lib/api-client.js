@@ -5,7 +5,41 @@ export function apiUrl(path) {
 }
 
 export async function api(path, options = {}) {
-  const response = await fetch(apiUrl(path), options);
+  const { timeoutMs = 0, ...fetchOptions } = options;
+  let timeoutId = 0;
+  let timedOut = false;
+  let abortController = null;
+  let abortOriginal = null;
+
+  if (timeoutMs > 0) {
+    abortController = new AbortController();
+    abortOriginal = () => abortController.abort();
+    if (fetchOptions.signal?.aborted) {
+      abortController.abort();
+    } else {
+      fetchOptions.signal?.addEventListener?.("abort", abortOriginal, { once: true });
+    }
+    timeoutId = setTimeout(() => {
+      timedOut = true;
+      abortController.abort();
+    }, timeoutMs);
+    fetchOptions.signal = abortController.signal;
+  }
+
+  let response;
+  try {
+    response = await fetch(apiUrl(path), fetchOptions);
+  } catch (error) {
+    if (timedOut) {
+      throw new Error("本地服务响应超时，请稍后重试。");
+    }
+    throw error;
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+    if (abortOriginal) {
+      options.signal?.removeEventListener?.("abort", abortOriginal);
+    }
+  }
   if (!response.ok) {
     const text = await response.text();
     throw new Error(text || `${response.status} ${response.statusText}`);

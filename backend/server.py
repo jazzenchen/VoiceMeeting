@@ -106,6 +106,13 @@ def main() -> int:
         os.environ["VOICE_MEETING_ALLOW_MODEL_DOWNLOAD"] = "1"
     os.environ.setdefault("VIBEAROUND_WORKSPACE", str(data_dir.parent))
 
+    try:
+        from backend.media_tools import prepare_ffmpeg_path
+
+        prepare_ffmpeg_path()
+    except Exception:
+        logger.exception("Failed to prepare bundled ffmpeg.")
+
     if args.parent_pid is not None:
         if args.parent_pid <= 0:
             parser.error("--parent-pid must be a positive integer")

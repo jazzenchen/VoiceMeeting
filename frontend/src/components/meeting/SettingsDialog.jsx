@@ -527,6 +527,7 @@ function LlmSettingsPanel({
   const currentModel = llmConfig.provider === "litellm" && llmConfig.litellm.model
     ? ` · ${llmConfig.litellm.model}`
     : "";
+  const missingLiteLlmModel = llmConfigDraft.provider === "litellm" && !String(llmConfigDraft.model || "").trim();
   return (
     <form className="settings-panel" onSubmit={saveLlmConfig}>
       <div className="settings-section-head">
@@ -539,6 +540,11 @@ function LlmSettingsPanel({
       </div>
 
       {llmConfig.config_error && <div className="error-line llm-error">{llmConfig.config_error}</div>}
+      {missingLiteLlmModel && (
+        <div className="error-line llm-error">
+          {t("LLM API 还没有配置模型名，填写后保存即可生成会议纪要。")}
+        </div>
+      )}
 
       <div className="llm-provider-tabs" role="radiogroup" aria-label={t("会议助手来源")}>
         <label className={`llm-provider-option ${llmConfigDraft.provider === "litellm" ? "active" : ""}`}>
@@ -632,6 +638,7 @@ function LlmSettingsPanel({
           saving={llmConfigSaving}
           dirty={llmConfigDirty}
           error={llmConfigError || llmConfig.config_error}
+          blockedLabel={missingLiteLlmModel ? "需配置" : ""}
         />
         <button type="submit" className="confirm-save" disabled={llmConfigSaving}>
           <Check size={14} />
