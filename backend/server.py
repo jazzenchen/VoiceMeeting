@@ -4,7 +4,6 @@ import argparse
 import logging
 import multiprocessing
 import os
-import signal
 import sys
 import threading
 import time
@@ -62,11 +61,7 @@ def _start_parent_watchdog(parent_pid: int) -> None:
     def watch() -> None:
         while True:
             if not _pid_alive(parent_pid):
-                logger.info("Parent process %s exited, stopping server.", parent_pid)
-                if sys.platform == "win32":
-                    os._exit(0)
-                os.kill(os.getpid(), signal.SIGTERM)
-                return
+                os._exit(0)
             time.sleep(2)
 
     thread = threading.Thread(target=watch, daemon=True)
