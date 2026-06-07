@@ -7,6 +7,7 @@ const EN = {
   "VoiceMeeting": "VoiceMeeting",
   "本地服务 · MLX": "Local service · MLX",
   "本地服务": "Local service",
+  "服务": "Service",
   "已就绪": "Ready",
   "启动中": "Starting",
   "未连接": "Offline",

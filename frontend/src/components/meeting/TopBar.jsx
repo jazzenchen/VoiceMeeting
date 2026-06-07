@@ -26,6 +26,13 @@ function serviceCompactText(value) {
   return serviceStatusText(value);
 }
 
+function shortModelName(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const parts = text.split("/").map((part) => part.trim()).filter(Boolean);
+  return parts.at(-1) || text;
+}
+
 function asrStatusText(modelStatus, recognitionUnavailableReason, t) {
   if (recognitionUnavailableReason) return "";
   if (!modelStatus) return "";
@@ -51,6 +58,17 @@ function assistantCompactText(llmStatus, t) {
     return `${t("LLM 模型接口")} ${suffix}`.trim();
   }
   return t(text);
+}
+
+function assistantPillText(llmStatus, t) {
+  const route = String(llmStatus?.route || llmStatus?.transport || llmStatus?.provider || "");
+  if (llmStatus?.provider === "litellm" || route.includes("litellm")) {
+    const model = shortModelName(llmStatus?.model);
+    return model ? `${t("LLM")} · ${model}` : `${t("LLM")} · ${t("需配置")}`;
+  }
+  if (route.includes("web-chat")) return "Codex";
+  if (!llmStatus?.transport && !llmStatus?.route && !llmStatus?.provider) return t("待配置");
+  return "VibeAround";
 }
 
 function assistantPillClass(llmStatus, fallbackClass) {
@@ -103,6 +121,10 @@ export function TopBar({
   ).size;
   const serviceReady = status?.backend === "ready";
   const asrPillText = serviceReady ? asrStatusText(modelStatus, recognitionUnavailableReason, t) : "";
+  const servicePillText = status.backend === "ready"
+    ? t("服务")
+    : `${t("服务")} · ${t(serviceCompactText(status.backend))}`;
+  const servicePillTitle = `${t("本地服务")} · ${t(serviceCompactText(status.backend))}`;
   const asrPillClass = recognitionUnavailableReason
     ? "warning"
     : modelStatus?.loading
@@ -113,6 +135,7 @@ export function TopBar({
         ? "offline"
         : "unknown";
   const speakerModeText = `${t("说话人")} · ${t(speakerModeName(speakerMode))}`;
+  const assistantPillTitle = assistantCompactText(llmStatus, t);
 
   return (
     <header className="topbar">
@@ -129,11 +152,11 @@ export function TopBar({
 
       <div className="topbar-actions">
         <div className="status-strip">
-          <span className={`pill ${servicePillClass}`}>{t("本地服务")} · {t(serviceCompactText(status.backend))}</span>
-          {asrPillText && <span className={`pill ${asrPillClass}`} title={asrPillText}>{asrPillText}</span>}
-          <span className="pill ready">{speakerModeText}</span>
-          <span className={`pill ${assistantPillClass(llmStatus, status.vibe)}`}>
-            {assistantCompactText(llmStatus, t)}
+          <span className={`pill ${servicePillClass}`} title={servicePillTitle}>{servicePillText}</span>
+          {asrPillText && <span className={`pill ${asrPillClass}`} title={asrPillText}>{t("识别")}</span>}
+          <span className="pill ready" title={speakerModeText}>{t("说话人")}</span>
+          <span className={`pill ${assistantPillClass(llmStatus, status.vibe)}`} title={assistantPillTitle}>
+            {assistantPillText(llmStatus, t)}
           </span>
           {recording && (
             <span className="pill wave-pill" title={t("麦克风电平")}>

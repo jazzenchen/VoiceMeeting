@@ -2780,16 +2780,18 @@ a {
 
 .app-shell .crumbs {
   min-width: 0;
-  flex: 1 1 auto;
+  flex: 1 1 0;
   display: flex;
   align-items: center;
   gap: 8px;
+  overflow: hidden;
   font-size: 13px;
 }
 
 .app-shell .meeting-title {
-  min-width: max-content;
-  max-width: 240px;
+  min-width: 0;
+  max-width: min(240px, 100%);
+  flex: 0 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2817,7 +2819,20 @@ a {
 .app-shell .status-strip {
   flex-wrap: nowrap;
   flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
+}
+
+.app-shell .status-strip .pill {
+  min-width: 0;
+  max-width: clamp(58px, 12vw, 150px);
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.app-shell .status-strip .wave-pill {
+  flex: 0 0 auto;
 }
 
 .app-shell .pill {
