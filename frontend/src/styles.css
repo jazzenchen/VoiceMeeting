@@ -3796,6 +3796,17 @@ a {
   }
 }
 
+@media (max-width: 1120px) {
+  .app-shell .crumbs {
+    flex-basis: 116px;
+  }
+
+  .app-shell .topbar .meeting-meta,
+  .app-shell .topbar .crumb-dot {
+    display: none;
+  }
+}
+
 /* Closer prototype match: rail, dense waveform, transcript rows, summary rail. */
 .app-shell {
   grid-template-columns: 280px minmax(0, 1fr);

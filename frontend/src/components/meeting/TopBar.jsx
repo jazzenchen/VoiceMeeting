@@ -27,7 +27,7 @@ function serviceCompactText(value) {
 }
 
 function shortModelName(value) {
-  const text = String(value || "").trim();
+  const text = compactStatusText(value).trim();
   if (!text) return "";
   const parts = text.split("/").map((part) => part.trim()).filter(Boolean);
   return parts.at(-1) || text;
