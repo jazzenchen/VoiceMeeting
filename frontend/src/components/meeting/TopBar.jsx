@@ -2,6 +2,12 @@ import { Languages, Moon, Settings, Sun } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import {
   WAVE_PATTERN,
   asrModelName,
   assistantStatusText,
@@ -26,11 +32,12 @@ function serviceCompactText(value) {
   return serviceStatusText(value);
 }
 
-function shortModelName(value) {
-  const text = compactStatusText(value).trim();
-  if (!text) return "";
-  const parts = text.split("/").map((part) => part.trim()).filter(Boolean);
-  return parts.at(-1) || text;
+function compactPillValue(value) {
+  return String(value || "")
+    .replace(/识别$/u, "")
+    .replace(/^声纹跟踪$/u, "声纹")
+    .replace(/^高精度分离$/u, "高精度")
+    .trim();
 }
 
 function asrStatusText(modelStatus, recognitionUnavailableReason, t) {
@@ -55,16 +62,15 @@ function assistantCompactText(llmStatus, t) {
   const litellm = text.match(/^LLM 模型接口\s*·\s*(.*)$/u);
   if (litellm) {
     const suffix = litellm[1] === "需要配置" ? t("需配置") : litellm[1];
-    return `${t("LLM 模型接口")} ${suffix}`.trim();
+    return `${t("LLM 模型接口")} · ${suffix}`.trim();
   }
   return t(text);
 }
 
-function assistantPillText(llmStatus, t) {
+function assistantPillValue(llmStatus, t) {
   const route = String(llmStatus?.route || llmStatus?.transport || llmStatus?.provider || "");
   if (llmStatus?.provider === "litellm" || route.includes("litellm")) {
-    const model = shortModelName(llmStatus?.model);
-    return model ? `${t("LLM")} · ${model}` : `${t("LLM")} · ${t("需配置")}`;
+    return llmStatus?.model ? t("LLM") : t("待配置");
   }
   if (route.includes("web-chat")) return "Codex";
   if (!llmStatus?.transport && !llmStatus?.route && !llmStatus?.provider) return t("待配置");
@@ -77,6 +83,36 @@ function assistantPillClass(llmStatus, fallbackClass) {
     return "warning";
   }
   return fallbackClass || "unknown";
+}
+
+function asrPillValue(modelStatus, recognitionUnavailableReason, t) {
+  if (recognitionUnavailableReason) return t("不可用");
+  if (!modelStatus) return "";
+  if (modelStatus.loading) return t("加载中");
+  if (modelStatus.last_error || modelStatus.load_error) return t("失败");
+  const model = modelStatus.label
+    || asrModelName(modelStatus.model || modelStatus.runtime_model || modelStatus.configured_model || "");
+  return model ? t(compactPillValue(model)) : "";
+}
+
+function StatusPill({ className = "", label, value, tooltip }) {
+  const text = [label, value].filter(Boolean).join(" · ");
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className={`pill status-pill ${className}`} aria-label={tooltip || text}>
+          <span className="pill-label">{label}</span>
+          {value && (
+            <>
+              <span className="pill-separator">·</span>
+              <span className="pill-value">{value}</span>
+            </>
+          )}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>{tooltip || text}</TooltipContent>
+    </Tooltip>
+  );
 }
 
 function releaseMouseFocus(event, action) {
@@ -121,10 +157,11 @@ export function TopBar({
   ).size;
   const serviceReady = status?.backend === "ready";
   const asrPillText = serviceReady ? asrStatusText(modelStatus, recognitionUnavailableReason, t) : "";
-  const servicePillText = status.backend === "ready"
-    ? t("服务")
-    : `${t("服务")} · ${t(serviceCompactText(status.backend))}`;
-  const servicePillTitle = `${t("本地服务")} · ${t(serviceCompactText(status.backend))}`;
+  const servicePillValue = t(serviceCompactText(status?.backend));
+  const servicePillTitle = [
+    `${t("本地服务")} · ${servicePillValue}`,
+    status?.backendDetail ? compactStatusText(status.backendDetail) : "",
+  ].filter(Boolean).join("\n");
   const asrPillClass = recognitionUnavailableReason
     ? "warning"
     : modelStatus?.loading
@@ -136,6 +173,7 @@ export function TopBar({
         : "unknown";
   const speakerModeText = `${t("说话人")} · ${t(speakerModeName(speakerMode))}`;
   const assistantPillTitle = assistantCompactText(llmStatus, t);
+  const assistantValue = assistantPillValue(llmStatus, t);
 
   return (
     <header className="topbar">
@@ -151,26 +189,53 @@ export function TopBar({
       </div>
 
       <div className="topbar-actions">
-        <div className="status-strip">
-          <span className={`pill ${servicePillClass}`} title={servicePillTitle}>{servicePillText}</span>
-          {asrPillText && <span className={`pill ${asrPillClass}`} title={asrPillText}>{t("识别")}</span>}
-          <span className="pill ready" title={speakerModeText}>{t("说话人")}</span>
-          <span className={`pill ${assistantPillClass(llmStatus, status.vibe)}`} title={assistantPillTitle}>
-            {assistantPillText(llmStatus, t)}
-          </span>
-          {recording && (
-            <span className="pill wave-pill" title={t("麦克风电平")}>
-              <span className="mini-wave" style={{ "--level": micLevel }}>
-                {WAVE_PATTERN.map((weight, index) => (
-                  <span
-                    key={`mini-${index}`}
-                    style={{ "--bar": Math.max(0.12, weight * micLevel) }}
-                  />
-                ))}
-              </span>
-            </span>
-          )}
-        </div>
+        <TooltipProvider>
+          <div className="status-strip">
+            <StatusPill
+              className={servicePillClass}
+              label={t("服务")}
+              value={servicePillValue}
+              tooltip={servicePillTitle}
+            />
+            {asrPillText && (
+              <StatusPill
+                className={asrPillClass}
+                label={t("识别")}
+                value={asrPillValue(modelStatus, recognitionUnavailableReason, t)}
+                tooltip={asrPillText}
+              />
+            )}
+            <StatusPill
+              className="ready"
+              label={t("说话人")}
+              value={t(compactPillValue(speakerModeName(speakerMode)))}
+              tooltip={speakerModeText}
+            />
+            <StatusPill
+              className={assistantPillClass(llmStatus, status.vibe)}
+              label={t("纪要")}
+              value={assistantValue}
+              tooltip={assistantPillTitle}
+            />
+            {recording && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="pill wave-pill" aria-label={t("麦克风电平")}>
+                    <span className="mini-wave" style={{ "--level": micLevel }}>
+                      {WAVE_PATTERN.map((weight, index) => (
+                        <span
+                          key={`mini-${index}`}
+                          style={{ "--bar": Math.max(0.12, weight * micLevel) }}
+                        />
+                      ))}
+                    </span>
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent>{t("麦克风电平")}</TooltipContent>
+              </Tooltip>
+            )}
+          </div>
+        </TooltipProvider>
         <Button
           type="button"
           variant="ghost"

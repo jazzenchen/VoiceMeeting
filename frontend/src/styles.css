@@ -2825,7 +2825,7 @@ a {
 
 .app-shell .status-strip .pill {
   min-width: 0;
-  max-width: clamp(58px, 12vw, 150px);
+  max-width: clamp(92px, 16vw, 176px);
   flex: 0 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2866,6 +2866,33 @@ a {
   border-radius: 999px;
   background: var(--accent);
   box-shadow: 0 0 8px var(--accent);
+}
+
+.app-shell .status-pill {
+  font-family: var(--type-ui);
+  letter-spacing: 0;
+}
+
+.app-shell .status-pill .pill-label,
+.app-shell .status-pill .pill-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.app-shell .status-pill .pill-label {
+  color: var(--fg-3);
+  font-weight: 720;
+}
+
+.app-shell .status-pill .pill-separator {
+  color: var(--fg-4);
+  flex: 0 0 auto;
+}
+
+.app-shell .status-pill .pill-value {
+  color: var(--fg);
+  font-weight: 760;
 }
 
 .app-shell .pill.fallback,
@@ -2930,6 +2957,37 @@ a {
   font-size: 10.5px;
   line-height: 1;
   letter-spacing: 0;
+}
+
+.vm-tooltip-content {
+  z-index: 80;
+  max-width: 280px;
+  padding: 8px 10px;
+  border: 1px solid #262a31;
+  border-radius: 8px;
+  background: #15181d;
+  color: #f0f1f5;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-line;
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.36);
+  transform-origin: var(--radix-tooltip-content-transform-origin);
+  animation: vm-tooltip-in 120ms ease-out;
+}
+
+.vm-tooltip-arrow {
+  fill: #15181d;
+}
+
+@keyframes vm-tooltip-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .app-shell .icon-btn:hover {
