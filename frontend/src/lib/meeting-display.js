@@ -250,6 +250,18 @@ function chunkStageLabel(statusValue) {
   return labels[statusValue] || statusValue || "待机";
 }
 
+function importedChunkStageLabel(chunk) {
+  if (!String(chunk?.cut_reason || "").includes("导入完整音视频")) return "";
+  const labels = {
+    saved: "导入音视频排队中",
+    converting: "准备完整音频",
+    transcribing: "完整音视频识别中",
+    diarizing: "完整音视频说话人分离中",
+    identifying_speakers: "完整音视频声纹匹配中",
+  };
+  return labels[chunk?.status] || "";
+}
+
 export function runtimeLine(runtime, pendingChunks, t = (value, values) => value) {
   const reprocess = runtime?.reprocess;
   if (reprocess && reprocess.status === "cancelling") {
@@ -284,6 +296,8 @@ export function runtimeLine(runtime, pendingChunks, t = (value, values) => value
   if (pendingChunks > 0 && active.length === 0) return t("保存音频中");
   if (active.length > 0) {
     const first = active[0];
+    const importedStage = importedChunkStageLabel(first);
+    if (importedStage) return t(importedStage);
     return t("第 {seq} 段 {stage}", {
       seq: first.seq || active.length,
       stage: t(chunkStageLabel(first.status)),
