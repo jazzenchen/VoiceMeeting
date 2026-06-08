@@ -75,6 +75,7 @@ from .model_registry import (
 from .model_downloads import ModelDownloadManager
 from .prompt_settings import PromptConfigStore
 from .recording_config import RecordingConfigStore
+from .reprocess_jobs import ReprocessCancelled, ReprocessJobStore
 from .speaker_tracker import SpeakerTracker, SpeakerTrackingUnavailable
 from .storage import MeetingStore
 from .summarizer import (
@@ -130,8 +131,7 @@ recording_config = RecordingConfigStore()
 summarizer = MeetingSummarizer(llm, prompt_getter=prompt_settings.get)
 summary_lock = asyncio.Lock()
 summary_states: Dict[str, Dict[str, Any]] = {}
-reprocess_states: Dict[str, Dict[str, Any]] = {}
-REPROCESS_ACTIVE_STATUSES = {"queued", "running", "cancelling"}
+reprocess_jobs = ReprocessJobStore(store)
 REALTIME_SUMMARY_ENABLED = False
 recording_model_load_error = ""
 llm_status_cache: Dict[str, Any] = {"updated_at": 0.0, "value": {}}
@@ -140,9 +140,6 @@ LLM_STATUS_TTL_SECONDS = 10.0
 SUMMARY_TASK_TIMEOUT_SECONDS = 300.0
 SUMMARY_STALE_SECONDS = 300.0
 
-
-class ReprocessCancelled(Exception):
-    pass
 
 SUPPORTED_ASR_LANGUAGES = {
     "mixed",
@@ -486,94 +483,6 @@ def set_summary_state(meeting_id: str, status: str, error: str = "") -> None:
     }
 
 
-def set_reprocess_state(job_id: str, **fields: Any) -> Dict[str, Any]:
-    current = dict(reprocess_states.get(job_id) or {})
-    if current.get("cancel_requested"):
-        requested_status = fields.get("status")
-        if requested_status in {"queued", "running"}:
-            fields["status"] = "cancelling"
-            fields.setdefault("stage", current.get("stage") or "取消中")
-        elif requested_status == "done":
-            fields["status"] = "cancelled"
-            fields["stage"] = "cancelled"
-            fields["error"] = "处理已停止。"
-    current.update(fields)
-    current["updated_at"] = now_iso()
-    reprocess_states[job_id] = current
-    return current
-
-
-def request_reprocess_cancel(job_id: str) -> Dict[str, Any]:
-    state = reprocess_states.get(job_id)
-    if not state:
-        raise KeyError(job_id)
-    if state.get("status") not in REPROCESS_ACTIVE_STATUSES:
-        return state
-    return set_reprocess_state(
-        job_id,
-        status="cancelling",
-        stage="取消中",
-        cancel_requested=True,
-    )
-
-
-def check_reprocess_cancelled(job_id: str) -> None:
-    state = reprocess_states.get(job_id) or {}
-    if state.get("cancel_requested") or state.get("status") == "cancelling":
-        raise ReprocessCancelled()
-
-
-def mark_reprocess_cancelled(
-    job_id: str,
-    meeting_id: str,
-    version_id: str = "",
-    inserted_total: int = 0,
-    changed_total: int = 0,
-) -> None:
-    state = reprocess_states.get(job_id) or {}
-    if version_id and version_id != "auto":
-        try:
-            version = store.get_transcript_version(meeting_id, version_id)
-            meeting = store.get_meeting(meeting_id)
-            if meeting.get("active_version_id") == version_id:
-                store.set_active_transcript_version(
-                    meeting_id,
-                    str(version.get("parent_version_id") or "auto"),
-                )
-            store.delete_segments_for_version(meeting_id, version_id)
-            store.update_transcript_version_status(
-                meeting_id,
-                version_id,
-                "cancelled",
-                {
-                    "error": "处理已停止。",
-                    "inserted_segments": inserted_total,
-                    "changed_segments": changed_total,
-                },
-            )
-        except Exception:
-            pass
-    set_reprocess_state(
-        job_id,
-        status="cancelled",
-        stage="cancelled",
-        cancel_requested=True,
-        progress=state.get("progress", 0),
-        error="处理已停止。",
-    )
-
-
-def latest_reprocess_state(meeting_id: str) -> Optional[Dict[str, Any]]:
-    jobs = [
-        state
-        for state in reprocess_states.values()
-        if state.get("meeting_id") == meeting_id
-    ]
-    if not jobs:
-        return None
-    return sorted(jobs, key=lambda item: str(item.get("updated_at") or ""))[-1]
-
-
 def get_summary_state(meeting_id: str) -> Dict[str, Any]:
     state = summary_states.get(meeting_id) or {"status": "idle", "error": "", "updated_at": ""}
     if state.get("status") not in {"queued", "updating"}:
@@ -635,7 +544,7 @@ def meeting_runtime(meeting_id: str) -> Dict[str, Any]:
         "active_chunks": active_chunks,
         "has_active_chunks": bool(active_chunks),
         "summary": summary_state,
-        "reprocess": latest_reprocess_state(meeting_id),
+        "reprocess": reprocess_jobs.latest_for_meeting(meeting_id),
         "asr": asr_runtime.active_status(),
         "diarization": diarizer.status(),
         "speaker_tracking": speaker_tracker.status(),
@@ -1037,18 +946,14 @@ async def rename_meeting_speaker(
 
 @app.get("/api/meetings/{meeting_id}/reprocess")
 async def list_reprocess_jobs(meeting_id: str) -> Dict[str, Any]:
-    jobs = [
-        state
-        for state in reprocess_states.values()
-        if state.get("meeting_id") == meeting_id
-    ]
+    jobs = reprocess_jobs.list_for_meeting(meeting_id)
     jobs = sorted(jobs, key=lambda item: str(item.get("created_at") or item.get("updated_at") or ""))
     return {"meeting_id": meeting_id, "jobs": jobs}
 
 
 @app.get("/api/meetings/{meeting_id}/reprocess/{job_id}")
 async def get_reprocess_job(meeting_id: str, job_id: str) -> Dict[str, Any]:
-    state = reprocess_states.get(job_id)
+    state = reprocess_jobs.get(job_id)
     if not state or state.get("meeting_id") != meeting_id:
         raise HTTPException(status_code=404, detail="找不到这个处理任务，请刷新后再试。")
     return state
@@ -1056,11 +961,11 @@ async def get_reprocess_job(meeting_id: str, job_id: str) -> Dict[str, Any]:
 
 @app.post("/api/meetings/{meeting_id}/reprocess/{job_id}/cancel")
 async def cancel_reprocess_job(meeting_id: str, job_id: str) -> Dict[str, Any]:
-    state = reprocess_states.get(job_id)
+    state = reprocess_jobs.get(job_id)
     if not state or state.get("meeting_id") != meeting_id:
         raise HTTPException(status_code=404, detail="找不到这个处理任务，请刷新后再试。")
     try:
-        return {"job": request_reprocess_cancel(job_id)}
+        return {"job": reprocess_jobs.request_cancel(job_id)}
     except KeyError:
         raise HTTPException(status_code=404, detail="找不到这个处理任务，请刷新后再试。")
 
@@ -1112,7 +1017,7 @@ async def start_reprocess_job(
             make_current=False,
         )
         store.update_transcript_version_status(meeting_id, version_id, "queued")
-        state = set_reprocess_state(
+        state = reprocess_jobs.set(
             job_id,
             id=job_id,
             meeting_id=meeting_id,
@@ -1161,7 +1066,7 @@ async def start_reprocess_job(
             make_current=False,
         )
         store.update_transcript_version_status(meeting_id, version_id, "queued")
-        state = set_reprocess_state(
+        state = reprocess_jobs.set(
             job_id,
             id=job_id,
             meeting_id=meeting_id,
@@ -1205,7 +1110,7 @@ async def start_reprocess_job(
             make_current=False,
         )
         store.update_transcript_version_status(meeting_id, version_id, "queued")
-        state = set_reprocess_state(
+        state = reprocess_jobs.set(
             job_id,
             id=job_id,
             meeting_id=meeting_id,
@@ -1301,7 +1206,7 @@ async def start_reprocess_job(
                 queue_summary_rebuild(meeting_id, background_tasks, "段落已整理")
         except KeyError:
             raise HTTPException(status_code=404, detail="找不到源稿件，请刷新后再试。")
-        state = set_reprocess_state(
+        state = reprocess_jobs.set(
             job_id,
             id=job_id,
             meeting_id=meeting_id,
@@ -1319,7 +1224,7 @@ async def start_reprocess_job(
         return {"job": state}
 
     if level in {"notes", "summary", "final-notes", "final_notes"}:
-        state = set_reprocess_state(
+        state = reprocess_jobs.set(
             job_id,
             id=job_id,
             meeting_id=meeting_id,
@@ -1837,13 +1742,13 @@ async def reprocess_asr_version(
     created_total = 0
     errors: list[str] = []
     try:
-        check_reprocess_cancelled(job_id)
+        reprocess_jobs.check_cancelled(job_id)
         asr_engine = asr_runtime.require_loaded_engine(model_name)
         meeting = store.get_meeting(meeting_id)
         audio = await ensure_single_meeting_audio(meeting_id, cleanup_chunks=False)
         if not audio:
             raise RuntimeError("完整会议音频还没有生成，请先停止录制或重新导入音频。")
-        check_reprocess_cancelled(job_id)
+        reprocess_jobs.check_cancelled(job_id)
         meeting = store.get_meeting(meeting_id)
         anchor_chunk = primary_timeline_chunk(meeting)
         audio_path = Path(str(audio["path"]))
@@ -1856,8 +1761,8 @@ async def reprocess_asr_version(
         }
         store.delete_segments_for_version(meeting_id, version_id)
         store.update_transcript_version_status(meeting_id, version_id, "running")
-        check_reprocess_cancelled(job_id)
-        set_reprocess_state(
+        reprocess_jobs.check_cancelled(job_id)
+        reprocess_jobs.set(
             job_id,
             status="running",
             stage="整理文字",
@@ -1866,8 +1771,8 @@ async def reprocess_asr_version(
         )
 
         meeting_for_prompt = store.get_meeting(meeting_id)
-        check_reprocess_cancelled(job_id)
-        set_reprocess_state(
+        reprocess_jobs.check_cancelled(job_id)
+        reprocess_jobs.set(
             job_id,
             stage="整理文字 1/1",
             progress=0,
@@ -1884,14 +1789,14 @@ async def reprocess_asr_version(
                 prompt_settings.get("asr_context", ""),
             ),
         )
-        check_reprocess_cancelled(job_id)
+        reprocess_jobs.check_cancelled(job_id)
 
         active_diarizer = diarizer_for_mode(speaker_mode)
         if active_diarizer is not None:
-            check_reprocess_cancelled(job_id)
+            reprocess_jobs.check_cancelled(job_id)
             try:
                 turns = await asyncio.to_thread(active_diarizer.diarize, audio_path)
-                check_reprocess_cancelled(job_id)
+                reprocess_jobs.check_cancelled(job_id)
                 if speaker_mode == "diarization":
                     result["segments"] = split_segments_by_turns(result["segments"], turns)
                     assigned_total += len(result["segments"])
@@ -1910,7 +1815,7 @@ async def reprocess_asr_version(
             "auto",
         }
         if use_speaker_tracking:
-            check_reprocess_cancelled(job_id)
+            reprocess_jobs.check_cancelled(job_id)
             try:
                 result["segments"], speaker_result = await asyncio.to_thread(
                     speaker_tracker.assign_segments,
@@ -1919,13 +1824,13 @@ async def reprocess_asr_version(
                     audio_path,
                     result["segments"],
                 )
-                check_reprocess_cancelled(job_id)
+                reprocess_jobs.check_cancelled(job_id)
                 assigned_total += int(speaker_result.get("assigned") or 0)
                 created_total += int(speaker_result.get("created") or 0)
             except SpeakerTrackingUnavailable as exc:
                 errors.append(str(exc))
 
-        check_reprocess_cancelled(job_id)
+        reprocess_jobs.check_cancelled(job_id)
         raw_segments = [segment_on_full_audio(segment) for segment in (result.get("segments") or [])]
         if not [segment for segment in raw_segments if str(segment.get("text") or "").strip()]:
             unrecognized_total += 1
@@ -1940,7 +1845,7 @@ async def reprocess_asr_version(
             version_id=version_id,
         )
         inserted_total += len(inserted)
-        set_reprocess_state(
+        reprocess_jobs.set(
             job_id,
             progress=1,
             inserted_segments=inserted_total,
@@ -1958,12 +1863,12 @@ async def reprocess_asr_version(
             "created_speakers": created_total,
             "errors": errors[:8],
         }
-        check_reprocess_cancelled(job_id)
+        reprocess_jobs.check_cancelled(job_id)
         store.update_transcript_version_status(meeting_id, version_id, "ready", settings)
-        check_reprocess_cancelled(job_id)
+        reprocess_jobs.check_cancelled(job_id)
         if make_current:
             store.set_active_transcript_version(meeting_id, version_id)
-        set_reprocess_state(
+        reprocess_jobs.set(
             job_id,
             status="done",
             stage="done",
@@ -1974,7 +1879,7 @@ async def reprocess_asr_version(
             created_speakers=created_total,
         )
     except ReprocessCancelled:
-        mark_reprocess_cancelled(job_id, meeting_id, version_id, inserted_total)
+        reprocess_jobs.mark_cancelled(job_id, meeting_id, version_id, inserted_total)
     except Exception as exc:
         try:
             store.update_transcript_version_status(
@@ -1985,7 +1890,7 @@ async def reprocess_asr_version(
             )
         except Exception:
             pass
-        set_reprocess_state(job_id, status="error", stage="error", error=str(exc))
+        reprocess_jobs.set(job_id, status="error", stage="error", error=str(exc))
 
 
 async def reprocess_speaker_version(
@@ -2002,10 +1907,10 @@ async def reprocess_speaker_version(
     assigned_total = 0
     errors: list[str] = []
     try:
-        check_reprocess_cancelled(job_id)
+        reprocess_jobs.check_cancelled(job_id)
         store.delete_segments_for_version(meeting_id, version_id)
         store.update_transcript_version_status(meeting_id, version_id, "running")
-        check_reprocess_cancelled(job_id)
+        reprocess_jobs.check_cancelled(job_id)
         if reset_speakers:
             store.delete_speakers(meeting_id)
 
@@ -2013,13 +1918,13 @@ async def reprocess_speaker_version(
         audio = await ensure_single_meeting_audio(meeting_id, cleanup_chunks=False)
         if not audio:
             raise RuntimeError("完整会议音频还没有生成，请先停止录制或重新导入音频。")
-        check_reprocess_cancelled(job_id)
+        reprocess_jobs.check_cancelled(job_id)
         meeting = store.get_meeting(meeting_id)
         anchor_chunk = primary_timeline_chunk(meeting)
         audio_path = Path(str(audio["path"]))
         source_segments = store.get_segments_for_version(meeting_id, source_version_id)
         source_segments = [segment_on_full_audio(segment) for segment in source_segments]
-        set_reprocess_state(
+        reprocess_jobs.set(
             job_id,
             status="running",
             stage="说话人分离",
@@ -2027,7 +1932,7 @@ async def reprocess_speaker_version(
             total=1,
         )
 
-        set_reprocess_state(
+        reprocess_jobs.set(
             job_id,
             stage="说话人分离 1/1",
             progress=0,
@@ -2038,9 +1943,9 @@ async def reprocess_speaker_version(
         try:
             active_diarizer = diarizer_for_mode(speaker_mode)
             if active_diarizer is not None:
-                check_reprocess_cancelled(job_id)
+                reprocess_jobs.check_cancelled(job_id)
                 turns = await asyncio.to_thread(active_diarizer.diarize, audio_path)
-                check_reprocess_cancelled(job_id)
+                reprocess_jobs.check_cancelled(job_id)
                 if speaker_mode == "diarization":
                     assigned_segments = split_segments_by_turns(source_segments, turns)
                     assigned_total += len(assigned_segments)
@@ -2057,7 +1962,7 @@ async def reprocess_speaker_version(
                 "auto",
             }
             if use_speaker_tracking:
-                check_reprocess_cancelled(job_id)
+                reprocess_jobs.check_cancelled(job_id)
                 assigned_segments, speaker_result = await asyncio.to_thread(
                     speaker_tracker.assign_segments,
                     store,
@@ -2065,7 +1970,7 @@ async def reprocess_speaker_version(
                     audio_path,
                     assigned_segments,
                 )
-                check_reprocess_cancelled(job_id)
+                reprocess_jobs.check_cancelled(job_id)
                 assigned_total += int(speaker_result.get("assigned") or 0)
                 created_total += int(speaker_result.get("created") or 0)
         except ReprocessCancelled:
@@ -2073,7 +1978,7 @@ async def reprocess_speaker_version(
         except Exception as exc:
             errors.append(str(exc))
 
-        check_reprocess_cancelled(job_id)
+        reprocess_jobs.check_cancelled(job_id)
         assigned_segments = [segment_on_full_audio(segment) for segment in assigned_segments]
         inserted = store.add_segments(
             meeting_id,
@@ -2082,7 +1987,7 @@ async def reprocess_speaker_version(
             version_id=version_id,
         )
         inserted_total += len(inserted)
-        set_reprocess_state(
+        reprocess_jobs.set(
             job_id,
             progress=1,
             inserted_segments=inserted_total,
@@ -2099,12 +2004,12 @@ async def reprocess_speaker_version(
             "created_speakers": created_total,
             "errors": errors[:8],
         }
-        check_reprocess_cancelled(job_id)
+        reprocess_jobs.check_cancelled(job_id)
         store.update_transcript_version_status(meeting_id, version_id, "ready", settings)
-        check_reprocess_cancelled(job_id)
+        reprocess_jobs.check_cancelled(job_id)
         if make_current:
             store.set_active_transcript_version(meeting_id, version_id)
-        set_reprocess_state(
+        reprocess_jobs.set(
             job_id,
             status="done",
             stage="done",
@@ -2115,7 +2020,7 @@ async def reprocess_speaker_version(
             error="; ".join(errors[:2]) if errors else "",
         )
     except ReprocessCancelled:
-        mark_reprocess_cancelled(job_id, meeting_id, version_id, inserted_total)
+        reprocess_jobs.mark_cancelled(job_id, meeting_id, version_id, inserted_total)
     except Exception as exc:
         try:
             store.update_transcript_version_status(
@@ -2126,7 +2031,7 @@ async def reprocess_speaker_version(
             )
         except Exception:
             pass
-        set_reprocess_state(job_id, status="error", stage="error", error=str(exc))
+        reprocess_jobs.set(job_id, status="error", stage="error", error=str(exc))
 
 
 def repair_batches(segments: list[Dict[str, Any]]) -> list[list[Dict[str, Any]]]:
@@ -2159,13 +2064,13 @@ async def reprocess_llm_repair_version(
     changed_total = 0
     repair_errors: list[str] = []
     try:
-        check_reprocess_cancelled(job_id)
+        reprocess_jobs.check_cancelled(job_id)
         store.delete_segments_for_version(meeting_id, version_id)
         store.update_transcript_version_status(meeting_id, version_id, "running")
         source_segments = store.get_segments_for_version(meeting_id, source_version_id)
         batches = repair_batches(source_segments)
-        check_reprocess_cancelled(job_id)
-        set_reprocess_state(
+        reprocess_jobs.check_cancelled(job_id)
+        reprocess_jobs.set(
             job_id,
             status="running",
             stage="LLM 精修",
@@ -2174,8 +2079,8 @@ async def reprocess_llm_repair_version(
         )
 
         for index, batch in enumerate(batches, start=1):
-            check_reprocess_cancelled(job_id)
-            set_reprocess_state(
+            reprocess_jobs.check_cancelled(job_id)
+            reprocess_jobs.set(
                 job_id,
                 stage=f"精修 {index}/{len(batches)}",
                 progress=index - 1,
@@ -2188,13 +2093,13 @@ async def reprocess_llm_repair_version(
                     summarizer.repair_segments(batch, meeting_for_prompt),
                     timeout=SUMMARY_TASK_TIMEOUT_SECONDS,
                 )
-                check_reprocess_cancelled(job_id)
+                reprocess_jobs.check_cancelled(job_id)
             except ReprocessCancelled:
                 raise
             except Exception as exc:
                 repair_errors.append(str(exc))
 
-            check_reprocess_cancelled(job_id)
+            reprocess_jobs.check_cancelled(job_id)
             repaired_segments = []
             for segment in batch:
                 repaired_text = repair_map.get(str(segment.get("id") or ""))
@@ -2216,8 +2121,8 @@ async def reprocess_llm_repair_version(
                     version_id=version_id,
                 )
                 inserted_total += len(inserted)
-            check_reprocess_cancelled(job_id)
-            set_reprocess_state(
+            reprocess_jobs.check_cancelled(job_id)
+            reprocess_jobs.set(
                 job_id,
                 progress=index,
                 inserted_segments=inserted_total,
@@ -2230,12 +2135,12 @@ async def reprocess_llm_repair_version(
             "changed_segments": changed_total,
             "repair_errors": repair_errors[:8],
         }
-        check_reprocess_cancelled(job_id)
+        reprocess_jobs.check_cancelled(job_id)
         store.update_transcript_version_status(meeting_id, version_id, "ready", settings)
-        check_reprocess_cancelled(job_id)
+        reprocess_jobs.check_cancelled(job_id)
         if make_current:
             store.set_active_transcript_version(meeting_id, version_id)
-        set_reprocess_state(
+        reprocess_jobs.set(
             job_id,
             status="done",
             stage="done",
@@ -2245,7 +2150,7 @@ async def reprocess_llm_repair_version(
             error="; ".join(repair_errors[:2]) if repair_errors else "",
         )
     except ReprocessCancelled:
-        mark_reprocess_cancelled(job_id, meeting_id, version_id, inserted_total, changed_total)
+        reprocess_jobs.mark_cancelled(job_id, meeting_id, version_id, inserted_total, changed_total)
     except Exception as exc:
         try:
             store.update_transcript_version_status(
@@ -2256,13 +2161,13 @@ async def reprocess_llm_repair_version(
             )
         except Exception:
             pass
-        set_reprocess_state(job_id, status="error", stage="error", error=str(exc))
+        reprocess_jobs.set(job_id, status="error", stage="error", error=str(exc))
 
 
 async def reprocess_final_notes(meeting_id: str, job_id: str, force_local: bool) -> None:
-    set_reprocess_state(job_id, status="running", stage="生成纪要", progress=0, total=1)
+    reprocess_jobs.set(job_id, status="running", stage="生成纪要", progress=0, total=1)
     try:
-        check_reprocess_cancelled(job_id)
+        reprocess_jobs.check_cancelled(job_id)
         meeting = store.get_meeting(meeting_id)
         source = transcript_source(meeting)
         if force_local:
@@ -2272,7 +2177,7 @@ async def reprocess_final_notes(meeting_id: str, job_id: str, force_local: bool)
                 summarizer.finalize(meeting),
                 timeout=SUMMARY_TASK_TIMEOUT_SECONDS,
             )
-        check_reprocess_cancelled(job_id)
+        reprocess_jobs.check_cancelled(job_id)
         markdown = await prepare_final_markdown_for_storage(
             store,
             summarizer,
@@ -2280,13 +2185,13 @@ async def reprocess_final_notes(meeting_id: str, job_id: str, force_local: bool)
             markdown,
             force_local,
         )
-        check_reprocess_cancelled(job_id)
+        reprocess_jobs.check_cancelled(job_id)
         store.set_final_markdown(meeting_id, markdown, source)
-        set_reprocess_state(job_id, status="done", stage="done", progress=1)
+        reprocess_jobs.set(job_id, status="done", stage="done", progress=1)
     except ReprocessCancelled:
-        mark_reprocess_cancelled(job_id, meeting_id, version_id=str((reprocess_states.get(job_id) or {}).get("version_id") or ""))
+        reprocess_jobs.mark_cancelled(job_id, meeting_id, version_id=reprocess_jobs.version_id(job_id))
     except asyncio.TimeoutError:
-        set_reprocess_state(
+        reprocess_jobs.set(
             job_id,
             status="error",
             stage="timeout",
@@ -2294,7 +2199,7 @@ async def reprocess_final_notes(meeting_id: str, job_id: str, force_local: bool)
             error=f"Final notes timed out after {int(SUMMARY_TASK_TIMEOUT_SECONDS)} seconds.",
         )
     except Exception as exc:
-        set_reprocess_state(job_id, status="error", stage="error", error=str(exc))
+        reprocess_jobs.set(job_id, status="error", stage="error", error=str(exc))
 
 
 async def update_summary_for_segments(meeting_id: str, inserted: list[Dict[str, Any]]) -> None:
