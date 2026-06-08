@@ -83,7 +83,10 @@ from .summarizer import (
     build_local_markdown,
     build_transcript_markdown,
     fallback_incremental_summary,
+    is_generic_meeting_title,
+    local_title_from_content,
     notes_only_markdown,
+    retitle_final_markdown,
 )
 from .transcript import build_utterances, is_unrecognized_text
 from .transcript_source import (
@@ -712,6 +715,38 @@ async def ensure_summary_current(meeting_id: str) -> Dict[str, Any]:
         return meeting
     await rebuild_summary_for_meeting(meeting_id, "当前稿件已更新", force=True)
     return store.get_meeting(meeting_id)
+
+
+async def prepare_final_markdown_for_storage(
+    meeting_id: str,
+    markdown: str,
+    force_local_title: bool = False,
+) -> str:
+    try:
+        latest = store.get_meeting(meeting_id)
+    except KeyError:
+        return markdown
+    if not is_generic_meeting_title(latest.get("title")):
+        return markdown
+
+    if force_local_title:
+        generated_title = local_title_from_content(latest, markdown)
+    else:
+        generated_title = await summarizer.generate_title(latest, markdown)
+    if not generated_title:
+        return markdown
+
+    try:
+        latest = store.get_meeting(meeting_id)
+        if is_generic_meeting_title(latest.get("title")):
+            store.update_meeting_title(
+                meeting_id,
+                generated_title,
+                latest.get("description") or "",
+            )
+    except Exception:
+        return markdown
+    return retitle_final_markdown(markdown, generated_title)
 
 
 async def send_changed_json(websocket: WebSocket, payload: Dict[str, Any], previous: str) -> str:
@@ -2272,6 +2307,8 @@ async def reprocess_final_notes(meeting_id: str, job_id: str, force_local: bool)
                 timeout=SUMMARY_TASK_TIMEOUT_SECONDS,
             )
         check_reprocess_cancelled(job_id)
+        markdown = await prepare_final_markdown_for_storage(meeting_id, markdown, force_local)
+        check_reprocess_cancelled(job_id)
         store.set_final_markdown(meeting_id, markdown, source)
         set_reprocess_state(job_id, status="done", stage="done", progress=1)
     except ReprocessCancelled:
@@ -2355,7 +2392,6 @@ async def finalize_meeting_stream(meeting_id: str, payload: FinalizeRequest) -> 
         try:
             if payload.force_local:
                 markdown = build_local_markdown(meeting)
-                yield sse_event("replace", {"markdown": markdown})
             else:
                 async for item in summarizer.finalize_stream(meeting):
                     kind = item.get("type")
@@ -2365,17 +2401,17 @@ async def finalize_meeting_stream(meeting_id: str, payload: FinalizeRequest) -> 
                             yield sse_event("chunk", {"text": text})
                     elif kind == "replace":
                         markdown = str(item.get("markdown") or "")
-                        yield sse_event("replace", {"markdown": markdown})
                     elif kind == "done":
                         if item.get("markdown"):
                             markdown = str(item["markdown"])
 
             if not markdown.strip() and payload.force_local:
                 markdown = build_local_markdown(meeting)
-                yield sse_event("replace", {"markdown": markdown})
             if not markdown.strip():
                 raise RuntimeError("纪要生成失败：模型接口没有返回内容。")
+            markdown = await prepare_final_markdown_for_storage(meeting_id, markdown, payload.force_local)
             store.set_final_markdown(meeting_id, markdown, source)
+            yield sse_event("replace", {"markdown": markdown})
             yield sse_event("done", {"meeting": attach_audio_payload(store.get_meeting(meeting_id))})
         except Exception as exc:
             yield sse_event("error", {"error": str(exc)})
@@ -2410,6 +2446,7 @@ async def finalize_meeting(meeting_id: str, payload: FinalizeRequest) -> Dict[st
             raise HTTPException(status_code=504, detail="纪要生成超时，请稍后重试。")
         except Exception as exc:
             raise HTTPException(status_code=502, detail=str(exc))
+    markdown = await prepare_final_markdown_for_storage(meeting_id, markdown, payload.force_local)
     store.set_final_markdown(meeting_id, markdown, source)
     return attach_audio_payload(store.get_meeting(meeting_id))
 

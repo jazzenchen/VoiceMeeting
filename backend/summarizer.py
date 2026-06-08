@@ -55,6 +55,15 @@ FINAL_COMPACT_PROMPT = """
 每节最多 5 条，必须完整结束，不要编造。
 """.strip()
 
+TITLE_PROMPT = """
+你是会议标题助手。请根据会议纪要和转写摘录生成一个中文会议标题。
+要求：
+1. 只输出标题本身，不要解释，不要引号，不要 Markdown。
+2. 标题必须不超过 20 个字。
+3. 保留最关键的业务对象、议题或决策，不要写“会议纪要”“今天的会议”等泛泛标题。
+4. 不要编造材料中没有出现的信息。
+""".strip()
+
 
 FINAL_REQUIRED_HEADINGS = [
     "会议摘要",
@@ -101,6 +110,16 @@ ACTION_TERMS = (
 )
 
 QUESTION_TERMS = ("吗", "什么", "哪些", "如何", "怎么", "是否", "?")
+GENERIC_MEETING_TITLES = {
+    "今天的会议",
+    "新会议",
+    "新会议标题",
+    "untitled meeting",
+    "meeting",
+    "会议纪要",
+    "导入音频",
+    "导入音视频",
+}
 
 
 REPAIR_PROMPT = """
@@ -133,6 +152,7 @@ DEFAULT_PROMPTS = {
     "incremental_summary": SYSTEM_PROMPT,
     "final_notes": FINAL_PROMPT,
     "final_notes_compact": FINAL_COMPACT_PROMPT,
+    "meeting_title": TITLE_PROMPT,
     "transcript_repair": REPAIR_PROMPT,
     "meeting_qa": ASK_PROMPT,
 }
@@ -158,6 +178,11 @@ DEFAULT_PROMPT_META = [
         "key": "final_notes_compact",
         "label": "精简纪要兜底",
         "description": "当纪要输出不完整时使用，要求更短但章节完整。",
+    },
+    {
+        "key": "meeting_title",
+        "label": "会议标题",
+        "description": "当会议仍是默认标题时，用纪要和转写生成 20 字以内标题。",
     },
     {
         "key": "incremental_summary",
@@ -208,6 +233,38 @@ def _clean_inline_text(text: str) -> str:
     cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
     cleaned = re.sub(r"([A-Za-z0-9])\1{7,}", r"\1", cleaned)
     return cleaned
+
+
+def is_generic_meeting_title(title: Any) -> bool:
+    cleaned = _clean_inline_text(str(title or "")).strip(" #「」\"'“”‘’")
+    return not cleaned or cleaned.lower() in GENERIC_MEETING_TITLES
+
+
+def clean_generated_title(title: Any, limit: int = 20) -> str:
+    cleaned = _clean_inline_text(str(title or ""))
+    cleaned = _strip_markdown_fence(cleaned)
+    cleaned = re.sub(r"^#+\s*", "", cleaned).strip()
+    cleaned = re.sub(r"^(会议标题|标题)\s*[:：]\s*", "", cleaned).strip()
+    cleaned = cleaned.strip(" #「」\"'“”‘’《》[]【】")
+    if not cleaned or is_generic_meeting_title(cleaned):
+        return ""
+    cleaned = re.sub(r"(会议纪要|会议|纪要)$", "", cleaned).strip()
+    cleaned = re.sub(r"[。.!！?？,，;；:：、]+$", "", cleaned).strip()
+    if not cleaned or is_generic_meeting_title(cleaned):
+        return ""
+    return cleaned[:limit].strip()
+
+
+def retitle_final_markdown(markdown: str, title: str) -> str:
+    clean_title = clean_generated_title(title)
+    if not clean_title:
+        return markdown
+    text = str(markdown or "").strip()
+    if re.match(r"^#\s+.+$", text, flags=re.M):
+        text = re.sub(r"^#\s+.+$", f"# {clean_title}", text, count=1, flags=re.M)
+    else:
+        text = f"# {clean_title}\n\n{text}"
+    return text.rstrip() + "\n"
 
 
 def _is_unrecognized_segment(item: Dict[str, Any]) -> bool:
@@ -364,6 +421,27 @@ def notes_only_markdown(markdown: str) -> str:
     return _trim_generated_markdown(markdown)
 
 
+def local_title_from_content(meeting: Dict[str, Any], markdown: str = "") -> str:
+    candidates: List[str] = []
+    for line in notes_only_markdown(markdown).splitlines():
+        cleaned = _clean_inline_text(line)
+        if not cleaned or cleaned.startswith("#") or cleaned.startswith("- 时间"):
+            continue
+        cleaned = re.sub(r"^[-*]\s+", "", cleaned).strip()
+        if cleaned in {"暂无", "无", "待确认"} or cleaned.endswith("："):
+            continue
+        candidates.append(cleaned)
+
+    if not candidates:
+        candidates = _candidate_sentences(meeting.get("utterances") or meeting.get("segments", []), max_items=80)
+
+    for candidate in candidates:
+        title = clean_generated_title(_shorten_item(candidate, 20))
+        if title:
+            return title
+    return ""
+
+
 def _has_heading(markdown: str, heading: str) -> bool:
     return bool(re.search(rf"^##\s+{re.escape(heading)}\s*$", markdown, flags=re.M))
 
@@ -471,9 +549,8 @@ class MeetingSummarizer:
             return ""
         title = re.sub(r"\s+", " ", str(meeting.get("title") or "")).strip()
         guidance = re.sub(r"\s+", " ", str(meeting.get("description") or "")).strip()
-        generic_titles = {"今天的会议", "新会议", "新会议标题", "untitled meeting", "meeting"}
         parts: List[str] = []
-        if title and title.lower() not in generic_titles:
+        if title and not is_generic_meeting_title(title):
             parts.append(f"会议标题：{title[:120]}")
         if guidance:
             parts.append(f"会议引导词：{guidance[:1200]}")
@@ -491,6 +568,32 @@ class MeetingSummarizer:
             f"本场会议上下文：\n{context}\n"
             "请把这些信息作为术语、背景和输出偏好的约束，但不要编造转写中没有出现的事实。"
         )
+
+    async def generate_title(self, meeting: Dict[str, Any], markdown: str = "") -> str:
+        fallback_title = local_title_from_content(meeting, markdown)
+        transcript = _transcript_for_prompt(meeting, max_chars=3200)
+        notes = notes_only_markdown(markdown)[:2400]
+        if not transcript.strip() and not notes.strip():
+            return fallback_title
+
+        messages = [
+            {"role": "system", "content": self.prompt("meeting_title", TITLE_PROMPT)},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "final_notes": notes,
+                        "transcript_excerpt": transcript,
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+        try:
+            response = await self.client.chat(messages, timeout=45.0)
+            return clean_generated_title(response) or fallback_title
+        except Exception:
+            return fallback_title
 
     async def update(
         self,
