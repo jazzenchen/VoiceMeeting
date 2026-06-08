@@ -2273,7 +2273,13 @@ async def reprocess_final_notes(meeting_id: str, job_id: str, force_local: bool)
                 timeout=SUMMARY_TASK_TIMEOUT_SECONDS,
             )
         check_reprocess_cancelled(job_id)
-        markdown = await prepare_final_markdown_for_storage(meeting_id, markdown, force_local)
+        markdown = await prepare_final_markdown_for_storage(
+            store,
+            summarizer,
+            meeting_id,
+            markdown,
+            force_local,
+        )
         check_reprocess_cancelled(job_id)
         store.set_final_markdown(meeting_id, markdown, source)
         set_reprocess_state(job_id, status="done", stage="done", progress=1)
