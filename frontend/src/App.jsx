@@ -88,26 +88,6 @@ function previewMeetingFromSummary(item) {
   };
 }
 
-function withFinalMarkdownFallback(meeting, markdown) {
-  if (!meeting) return meeting;
-  const fallbackMarkdown = String(markdown || "").trim();
-  const meetingMarkdown = String(meeting.final_markdown || "").trim();
-  const finalMarkdown = meetingMarkdown || fallbackMarkdown;
-  if (!finalMarkdown) return meeting;
-
-  const activeVersionId = meeting.active_version_id || "auto";
-  const finalSourceVersionId = meeting.final_source_version_id || activeVersionId;
-  const finalSourceHash = meeting.final_source_hash || (
-    finalSourceVersionId === activeVersionId ? "streamed-final-notes" : ""
-  );
-  return {
-    ...meeting,
-    final_markdown: meeting.final_markdown || finalMarkdown,
-    final_source_version_id: finalSourceVersionId,
-    final_source_hash: finalSourceHash,
-  };
-}
-
 const REPROCESS_ACTIVE_STATUSES = new Set(["queued", "running", "cancelling"]);
 
 function reprocessActive(job) {
@@ -1882,9 +1862,9 @@ function App() {
         },
         done: ({ meeting: updated }) => {
           if (updated) {
-            finalized = withFinalMarkdownFallback(updated, streamedMarkdown);
-            setMeeting(finalized);
-            setTitle(finalized.title || "");
+            finalized = updated;
+            setMeeting(updated);
+            setTitle(updated.title || "");
           }
         },
         error: ({ error }) => {
@@ -1896,11 +1876,6 @@ function App() {
         setTitle(finalized.title || "");
       } else {
         await refreshMeeting(id);
-        if (streamedMarkdown.trim()) {
-          setMeeting((current) => (
-            current?.id === id ? withFinalMarkdownFallback(current, streamedMarkdown) : current
-          ));
-        }
       }
       setStreamingFinalMarkdown("");
       setPipelineStatus("完成");

@@ -488,10 +488,11 @@ class MeetingStore:
             segment_rows = [dict(row) for row in segments]
             chunk_rows = [dict(row) for row in chunks]
             speaker_rows = [dict(row) for row in speakers]
+            logical_segment_rows = logical_segments(segment_rows, chunk_rows)
             final_markdown = ""
             final_source_hash = ""
             final_source_version_id = ""
-            current_source = self._transcript_source_for_segments(active_version_id, segment_rows)
+            current_source = self._transcript_source_for_segments(active_version_id, logical_segment_rows)
             final_note = conn.execute(
                 """
                 SELECT markdown, source_hash, version_id
@@ -536,7 +537,7 @@ class MeetingStore:
             "final_source_hash": final_source_hash,
             "final_source_version_id": final_source_version_id,
             "final_markdown": final_markdown,
-            "segments": logical_segments(segment_rows, chunk_rows),
+            "segments": logical_segment_rows,
             "utterances": build_utterances(segment_rows, chunk_rows),
             "chunks": chunk_rows,
             "speakers": speaker_rows,
