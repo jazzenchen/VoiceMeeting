@@ -1493,12 +1493,18 @@ function App() {
       setPipelineStatus(asrReady ? "保存音频" : "准备语音识别");
       setError("");
       const form = new FormData();
+      const sourceFilename = String(metadata.filename || blob.name || "")
+        .split(/[\\/]/u)
+        .pop()
+        .trim();
       const extension = blob.type.includes("wav")
         ? "wav"
-        : blob.type.includes("mp4") || blob.type.includes("aac")
+        : blob.type.includes("video/mp4") || blob.type.includes("mp4")
+          ? "mp4"
+          : blob.type.includes("aac")
           ? "m4a"
           : "webm";
-      form.append("audio", blob, `chunk-${Date.now()}.${extension}`);
+      form.append("audio", blob, sourceFilename || `chunk-${Date.now()}.${extension}`);
       form.append("duration_ms", String(Math.max(0, Math.round(durationMs))));
       form.append("language", activeConfig.language);
       form.append("asr_model", activeConfig.asrModel);
@@ -2117,7 +2123,6 @@ function App() {
     importingAudio,
     meetingIdRef,
     recording,
-    recordingConfigRef,
     refreshMeeting,
     refreshMeetings,
     serviceReady,

@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import { api } from "@/lib/api-client";
-import { audioBufferToMono, encodeWav, makeVadChunks } from "@/lib/audio-processing";
+import { audioBufferToMono } from "@/lib/audio-processing";
 import { userFriendlyError } from "@/lib/error-messages";
 import { titleFromAudioFile } from "@/lib/meeting-state";
 import { waveformFromSamples } from "@/lib/timeline-model";
@@ -35,7 +35,6 @@ export function useAudioFileImport({
   importingAudio,
   meetingIdRef,
   recording,
-  recordingConfigRef,
   refreshMeeting,
   refreshMeetings,
   serviceReady,
@@ -113,35 +112,24 @@ export function useAudioFileImport({
           return;
         }
 
-        const slicedChunks = makeVadChunks(samples, audioBuffer.sampleRate, recordingConfigRef.current);
         chunkSeqRef.current = 0;
-        setPipelineStatus(`正在整理音频 · ${slicedChunks.length} 段`);
+        setPipelineStatus("正在识别完整音视频");
         if (stopRequestedRef.current) {
           setPipelineStatus("已停止");
           await stopImportedMeeting(id, { refreshMeeting, refreshMeetings, setMeeting });
           updatePreview(1, false);
           return;
         }
-        if (slicedChunks.length === 0) {
-          setPipelineStatus("未检测到人声");
-          await stopImportedMeeting(id, { refreshMeeting, refreshMeetings, setMeeting });
-          updatePreview(1, false);
-          return;
-        }
 
-        for (const item of slicedChunks) {
-          if (stopRequestedRef.current) break;
-          chunkSeqRef.current += 1;
-          const blob = encodeWav(item.samples, audioBuffer.sampleRate);
-          await enqueueChunk(blob, item.endedAtMs - item.startedAtMs, {
-            clientChunkId: `${id}-import-${chunkSeqRef.current}`,
-            startedAtMs: item.startedAtMs,
-            endedAtMs: item.endedAtMs,
-            cutReason: item.cutReason,
-          });
-          updatePreview(item.endedAtMs / durationMs, true);
-          if (stopRequestedRef.current) break;
-        }
+        chunkSeqRef.current = 1;
+        await enqueueChunk(file, durationMs, {
+          clientChunkId: `${id}-import-full`,
+          filename: file.name,
+          startedAtMs: 0,
+          endedAtMs: durationMs,
+          cutReason: "导入完整音视频",
+        });
+        updatePreview(1, !stopRequestedRef.current);
 
         if (stopRequestedRef.current) {
           setPipelineStatus("已停止");
