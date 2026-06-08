@@ -4851,18 +4851,6 @@ a {
   opacity: 0.52;
 }
 
-.app-shell .tl-track.loading-waveform::before {
-  content: "";
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: max(7%, var(--wave-progress, 0%));
-  border-radius: inherit;
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-  transition: width 160ms linear;
-  pointer-events: none;
-  z-index: 0;
-}
-
 .app-shell .tl-track.loading-waveform::after {
   content: "";
   position: absolute;

@@ -288,6 +288,40 @@ function waveformFromBins(bins) {
   }));
 }
 
+export function waveformFromSamples(samples) {
+  const source = samples instanceof Float32Array ? samples : new Float32Array(samples || []);
+  if (!source.length) return null;
+  const bins = Array.from({ length: WAVEFORM_BAR_COUNT }, () => ({
+    peak: 0,
+    rms: 0,
+    samples: 0,
+    hasAudio: false,
+  }));
+
+  for (let index = 0; index < WAVEFORM_BAR_COUNT; index += 1) {
+    const startSample = Math.floor(source.length * index / WAVEFORM_BAR_COUNT);
+    const endSample = Math.min(source.length, Math.ceil(source.length * (index + 1) / WAVEFORM_BAR_COUNT));
+    const stride = Math.max(1, Math.floor((endSample - startSample) / 240));
+    let peak = 0;
+    let sum = 0;
+    let count = 0;
+    for (let sample = startSample; sample < endSample; sample += stride) {
+      const value = Math.abs(source[sample] || 0);
+      if (value > peak) peak = value;
+      sum += value * value;
+      count += 1;
+    }
+    if (!count) continue;
+    const rms = Math.sqrt(sum / count);
+    bins[index].peak = peak;
+    bins[index].rms = rms;
+    bins[index].samples = count;
+    bins[index].hasAudio = peak > 0.0001 || rms > 0.00005;
+  }
+
+  return waveformFromBins(bins);
+}
+
 export async function fetchMeetingAudioWaveform(meetingId, cacheToken, signal, onProgress) {
   if (!meetingId) return null;
   onProgress?.(0.08);

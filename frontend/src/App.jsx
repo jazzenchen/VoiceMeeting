@@ -140,6 +140,7 @@ function App() {
   const [liveWaveformBars, setLiveWaveformBars] = useState([]);
   const [liveRecordingMs, setLiveRecordingMs] = useState(0);
   const [importingAudio, setImportingAudio] = useState(false);
+  const [importWaveformPreview, setImportWaveformPreview] = useState(null);
   const [downloadBusy, setDownloadBusy] = useState("");
   const [processingStopBusy, setProcessingStopBusy] = useState(false);
   const [runtimeStatus, setRuntimeStatus] = useState(null);
@@ -2122,6 +2123,7 @@ function App() {
     serviceReady,
     setError,
     setImportingAudio,
+    setImportWaveformPreview,
     setMeeting,
     setPipelineStatus,
     setProcessingStopBusy,
@@ -2287,9 +2289,10 @@ function App() {
           playing={visiblePlaybackPlaying}
           playbackBusy={visiblePlaybackBusy}
           recording={recording}
-          liveWaveformBars={liveWaveformBars}
-          liveRecordingMs={liveRecordingMs}
-          onPlayToggle={playMeeting}
+	          liveWaveformBars={liveWaveformBars}
+	          liveRecordingMs={liveRecordingMs}
+	          importWaveformPreview={importWaveformPreview}
+	          onPlayToggle={playMeeting}
           onPreview={previewPlaybackAt}
           onJump={startPlaybackAt}
         />

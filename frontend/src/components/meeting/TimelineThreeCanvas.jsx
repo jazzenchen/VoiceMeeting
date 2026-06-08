@@ -286,7 +286,7 @@ function barGroupKey(bar) {
 function updateLoadingProgress(runtime, loadingProgress) {
   const progress = clamp01(loadingProgress);
   const laneWidth = drawWidthRatio(runtime);
-  runtime.progressMesh.visible = progress > 0 && progress < 1;
+  runtime.progressMesh.visible = false;
   runtime.progressMesh.position.x = mapTimelineX(runtime, progress / 2);
   runtime.progressMesh.scale.x = laneWidth * progress;
 }
@@ -311,6 +311,7 @@ function updateBars(runtime, bars = [], loadingProgress = 0) {
 
   for (let index = 0; index < bars.length; index += 1) {
     const bar = bars[index] || {};
+    if (bar.hidden) continue;
     const amp = clamp01(bar.amplitude);
     const height = Math.max(0.014, 0.025 + amp * maxHeight);
     const x = mapTimelineX(runtime, (index + 0.5) / count);

@@ -3,6 +3,7 @@ import { api } from "@/lib/api-client";
 import { audioBufferToMono, encodeWav, makeVadChunks } from "@/lib/audio-processing";
 import { userFriendlyError } from "@/lib/error-messages";
 import { titleFromAudioFile } from "@/lib/meeting-state";
+import { waveformFromSamples } from "@/lib/timeline-model";
 
 async function decodeAudioFile(file) {
   const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
@@ -40,6 +41,7 @@ export function useAudioFileImport({
   serviceReady,
   setError,
   setImportingAudio,
+  setImportWaveformPreview,
   setMeeting,
   setPipelineStatus,
   setProcessingStopBusy,
@@ -71,6 +73,7 @@ export function useAudioFileImport({
 
       setError("");
       setPipelineStatus("准备导入音视频");
+      setImportWaveformPreview?.(null);
       stopRequestedRef.current = false;
       try {
         if (!(await ensureRecordingModels())) return;
@@ -87,24 +90,42 @@ export function useAudioFileImport({
         const id = created.id;
 
         const audioBuffer = await decodeAudioFile(file);
+        const samples = audioBufferToMono(audioBuffer);
+        const durationMs = Math.max(1, Math.round((audioBuffer.duration || 0) * 1000));
+        const previewWaveform = waveformFromSamples(samples);
+        const updatePreview = (progress, loading = true) => {
+          setImportWaveformPreview?.((current) => {
+            if (current?.meetingId && current.meetingId !== id) return current;
+            return {
+              meetingId: id,
+              durationMs,
+              waveform: previewWaveform,
+              progress: Math.max(Number(current?.progress) || 0, Math.max(0, Math.min(1, progress))),
+              loading,
+            };
+          });
+        };
+        if (previewWaveform) updatePreview(0.035, true);
         if (stopRequestedRef.current) {
           setPipelineStatus("已停止");
           await stopImportedMeeting(id, { refreshMeeting, refreshMeetings, setMeeting });
+          updatePreview(1, false);
           return;
         }
 
-        const samples = audioBufferToMono(audioBuffer);
         const slicedChunks = makeVadChunks(samples, audioBuffer.sampleRate, recordingConfigRef.current);
         chunkSeqRef.current = 0;
         setPipelineStatus(`正在整理音频 · ${slicedChunks.length} 段`);
         if (stopRequestedRef.current) {
           setPipelineStatus("已停止");
           await stopImportedMeeting(id, { refreshMeeting, refreshMeetings, setMeeting });
+          updatePreview(1, false);
           return;
         }
         if (slicedChunks.length === 0) {
           setPipelineStatus("未检测到人声");
           await stopImportedMeeting(id, { refreshMeeting, refreshMeetings, setMeeting });
+          updatePreview(1, false);
           return;
         }
 
@@ -118,6 +139,7 @@ export function useAudioFileImport({
             endedAtMs: item.endedAtMs,
             cutReason: item.cutReason,
           });
+          updatePreview(item.endedAtMs / durationMs, true);
           if (stopRequestedRef.current) break;
         }
 
@@ -127,7 +149,9 @@ export function useAudioFileImport({
           setPipelineStatus("已完成");
         }
         await stopImportedMeeting(id, { refreshMeeting, refreshMeetings, setMeeting });
+        updatePreview(1, false);
       } catch (err) {
+        setImportWaveformPreview?.(null);
         if (err?.name === "AbortError") {
           setPipelineStatus("已停止");
           return;
@@ -151,6 +175,7 @@ export function useAudioFileImport({
       serviceReady,
       setError,
       setImportingAudio,
+      setImportWaveformPreview,
       setMeeting,
       setPipelineStatus,
       setProcessingStopBusy,

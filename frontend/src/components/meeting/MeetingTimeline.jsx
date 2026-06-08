@@ -36,6 +36,7 @@ export function MeetingTimeline({
   recording = false,
   liveWaveformBars = [],
   liveRecordingMs = 0,
+  importWaveformPreview = null,
   onPlayToggle,
   onPreview,
   onJump,
@@ -56,12 +57,22 @@ export function MeetingTimeline({
   const canonicalAudioUrl = liveMode ? "" : String(meeting?.audio?.audio_url || "");
   const canonicalAudioDurationMs = liveMode ? 0 : Number(meeting?.audio?.duration_ms) || 0;
   const hasCanonicalAudio = Boolean(canonicalAudioUrl && canonicalAudioDurationMs > 0);
+  const matchingImportPreview = !liveMode && importWaveformPreview?.meetingId === meeting?.id
+    ? importWaveformPreview
+    : null;
+  const importPreviewWaveform = Array.isArray(matchingImportPreview?.waveform)
+    ? matchingImportPreview.waveform
+    : null;
+  const importPreviewDurationMs = Number(matchingImportPreview?.durationMs) || 0;
+  const importPreviewTargetProgress = Math.max(0, Math.min(1, Number(matchingImportPreview?.progress) || 0));
+  const [importRevealProgress, setImportRevealProgress] = useState(importPreviewTargetProgress);
   const liveBars = Array.isArray(liveWaveformBars) ? liveWaveformBars : [];
   const baseDurationMs = Math.max(
     canonicalAudioDurationMs,
+    importPreviewDurationMs,
     lastPartEnd,
     lastChunkEnd,
-    parts.length || chunks.length || hasCanonicalAudio ? 1000 : 120000,
+    parts.length || chunks.length || hasCanonicalAudio || importPreviewDurationMs ? 1000 : 120000,
   );
   const durationMs = liveMode ? Math.max(Number(liveRecordingMs) || 0, lastChunkEnd, 1000) : baseDurationMs;
   const playheadMs = liveMode ? durationMs : Number.isFinite(playbackPositionMs) ? playbackPositionMs : 0;
@@ -100,7 +111,35 @@ export function MeetingTimeline({
     : "";
 
   useEffect(() => {
+    setImportRevealProgress(importPreviewTargetProgress);
+  }, [matchingImportPreview?.meetingId]);
+
+  useEffect(() => {
+    if (!matchingImportPreview) {
+      setImportRevealProgress(0);
+      return undefined;
+    }
+    let frame = 0;
+    const tick = () => {
+      setImportRevealProgress((current) => {
+        if (importPreviewTargetProgress <= current) return importPreviewTargetProgress;
+        const step = Math.max(0.004, (importPreviewTargetProgress - current) * 0.18);
+        return Math.min(importPreviewTargetProgress, current + step);
+      });
+      frame = window.requestAnimationFrame(tick);
+    };
+    frame = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(frame);
+  }, [importPreviewTargetProgress, matchingImportPreview]);
+
+  useEffect(() => {
     if (liveMode) {
+      setAudioWaveform(null);
+      setWaveformLoading(false);
+      setWaveformProgress(0);
+      return undefined;
+    }
+    if (matchingImportPreview?.loading && importPreviewWaveform) {
       setAudioWaveform(null);
       setWaveformLoading(false);
       setWaveformProgress(0);
@@ -176,14 +215,23 @@ export function MeetingTimeline({
     canonicalAudioUrl,
     chunkSignature,
     durationMs,
+    importPreviewWaveform,
     liveMode,
     meeting?.id,
+    matchingImportPreview?.loading,
     waveformChunks,
   ]);
 
+  const visibleWaveform = audioWaveform || importPreviewWaveform;
+  const revealingImportWaveform = Boolean(importPreviewWaveform && !audioWaveform);
+  const timelineLoading = waveformLoading || Boolean(matchingImportPreview?.loading);
+  const timelineLoadingProgress = matchingImportPreview?.loading
+    ? importRevealProgress
+    : waveformProgress;
+
   const bars = useMemo(() => {
-    if (!liveMode && waveformLoading && !audioWaveform) return [];
-    if (!liveMode && !audioWaveform && !parts.length) return [];
+    if (!liveMode && timelineLoading && !visibleWaveform) return [];
+    if (!liveMode && !visibleWaveform && !parts.length) return [];
 
     return Array.from({ length: WAVEFORM_BAR_COUNT }, (_, index) => {
       if (liveMode) {
@@ -196,13 +244,22 @@ export function MeetingTimeline({
           speakerIndex: 0,
         };
       }
+      if (revealingImportWaveform && (index + 0.5) / WAVEFORM_BAR_COUNT > importRevealProgress) {
+        return {
+          amplitude: 0,
+          active: false,
+          hasAudio: false,
+          hidden: true,
+          speakerIndex: -1,
+        };
+      }
       const centerMs = durationMs * (index + 0.5) / WAVEFORM_BAR_COUNT;
       const part = parts.find((item) => {
         const start = Number(item.start_ms) || 0;
         const end = Number(item.end_ms) || start + 1200;
         return centerMs >= start && centerMs <= end;
       });
-      const audioBin = audioWaveform?.[index];
+      const audioBin = visibleWaveform?.[index];
       let amplitude = audioBin?.amplitude;
       if (!Number.isFinite(amplitude)) {
         const ghost = GHOST_BARS[index % GHOST_BARS.length];
@@ -227,7 +284,17 @@ export function MeetingTimeline({
         speakerIndex,
       };
     });
-  }, [audioWaveform, durationMs, liveBars, liveMode, parts, speakerIndexByName, waveformLoading]);
+  }, [
+    durationMs,
+    importRevealProgress,
+    liveBars,
+    liveMode,
+    parts,
+    revealingImportWaveform,
+    speakerIndexByName,
+    timelineLoading,
+    visibleWaveform,
+  ]);
 
   const jumpBy = (direction) => {
     if (!canNavigate) return;
@@ -338,7 +405,7 @@ export function MeetingTimeline({
       </div>
 
       <div
-        className={`tl-canvas ${scrubbing ? "scrubbing" : ""} ${waveformLoading && !liveMode ? "loading-waveform" : ""} ${liveMode ? "live-recording" : ""}`}
+        className={`tl-canvas ${scrubbing ? "scrubbing" : ""} ${timelineLoading && !liveMode ? "loading-waveform" : ""} ${liveMode ? "live-recording" : ""}`}
         onPointerDown={startScrub}
         onPointerMove={movePointer}
         onPointerUp={endScrub}
@@ -366,9 +433,9 @@ export function MeetingTimeline({
           ))}
         </div>
         <div
-          className={`tl-track ${waveformLoading && !liveMode ? "loading-waveform" : ""} ${liveMode ? "live-recording" : ""}`}
+          className={`tl-track ${timelineLoading && !liveMode ? "loading-waveform" : ""} ${liveMode ? "live-recording" : ""}`}
           style={{
-            "--wave-progress": `${Math.round(waveformProgress * 100)}%`,
+            "--wave-progress": `${Math.round(timelineLoadingProgress * 100)}%`,
             "--tl-edge-pad": `${TIMELINE_EDGE_PAD_PX}px`,
           }}
         >
@@ -378,14 +445,14 @@ export function MeetingTimeline({
               marks={marks}
               playheadRatio={pct(displayPlayheadMs) / 100}
               hoverRatio={Number.isFinite(hoverMs) ? pct(hoverMs) / 100 : null}
-              loadingProgress={waveformLoading && !liveMode ? waveformProgress : 0}
+              loadingProgress={0}
               edgePadPx={TIMELINE_EDGE_PAD_PX}
             />
           </Suspense>
-          {waveformLoading && !liveMode && (
+          {timelineLoading && !liveMode && (
             <div className="tl-wave-loading" role="status" aria-live="polite">
               <span className="tl-load-dot" aria-hidden="true" />
-              <span>{t("加载音频波形 {progress}%", { progress: Math.round(waveformProgress * 100) })}</span>
+              <span>{t("加载音频波形 {progress}%", { progress: Math.round(timelineLoadingProgress * 100) })}</span>
             </div>
           )}
         </div>
