@@ -2428,7 +2428,7 @@ function App() {
   const playMeeting = useCallback(async () => {
     if (recording) return;
     const isCurrentPlaybackMeeting = Boolean(meeting?.id && playbackMeetingId === meeting.id);
-    if (playing && isCurrentPlaybackMeeting) {
+    if ((playing || playbackBusy) && isCurrentPlaybackMeeting) {
       await stopPlayback("已暂停", { preservePosition: true, preserveMeeting: true, clearCache: false });
       return;
     }
@@ -2438,17 +2438,22 @@ function App() {
         ? playbackPreview.positionMs
         : 0;
     await startPlaybackAt(resumeMs);
-  }, [meeting?.id, playbackMeetingId, playbackPositionMs, playbackPreview, playing, recording, startPlaybackAt, stopPlayback]);
+  }, [meeting?.id, playbackBusy, playbackMeetingId, playbackPositionMs, playbackPreview, playing, recording, startPlaybackAt, stopPlayback]);
 
   useEffect(() => {
     const handleGlobalPlaybackKey = (event) => {
       if (event.defaultPrevented || event.repeat) return;
       if (event.altKey || event.ctrlKey || event.metaKey) return;
       if (event.code !== "Space" && event.key !== " " && event.key !== "Spacebar") return;
+      const canPauseCurrentPlayback = Boolean(
+        meeting?.id
+        && playbackMeetingId === meeting.id
+        && (playing || playbackBusy)
+      );
       if (
         !meeting?.id
         || recording
-        || playbackBusy
+        || (playbackBusy && !canPauseCurrentPlayback)
         || settingsOpen
         || propertiesOpen
         || Boolean(deleteTarget)
@@ -2468,6 +2473,8 @@ function App() {
     meeting?.id,
     playMeeting,
     playbackBusy,
+    playbackMeetingId,
+    playing,
     propertiesOpen,
     recording,
     settingsOpen,
