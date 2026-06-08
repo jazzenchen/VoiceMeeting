@@ -76,6 +76,7 @@ from .model_downloads import ModelDownloadManager
 from .prompt_settings import PromptConfigStore
 from .recording_config import RecordingConfigStore
 from .reprocess_jobs import ReprocessCancelled, ReprocessJobStore
+from .speaker_snapshots import capture_speaker_snapshot, restore_speaker_snapshot
 from .speaker_tracker import SpeakerTracker, SpeakerTrackingUnavailable
 from .storage import MeetingStore
 from .summarizer import (
@@ -1741,6 +1742,7 @@ async def reprocess_asr_version(
     assigned_total = 0
     created_total = 0
     errors: list[str] = []
+    speaker_snapshot = None
     try:
         reprocess_jobs.check_cancelled(job_id)
         asr_engine = asr_runtime.require_loaded_engine(model_name)
@@ -1817,6 +1819,7 @@ async def reprocess_asr_version(
         if use_speaker_tracking:
             reprocess_jobs.check_cancelled(job_id)
             try:
+                speaker_snapshot = capture_speaker_snapshot(store, meeting_id)
                 result["segments"], speaker_result = await asyncio.to_thread(
                     speaker_tracker.assign_segments,
                     store,
@@ -1868,6 +1871,7 @@ async def reprocess_asr_version(
         reprocess_jobs.check_cancelled(job_id)
         if make_current:
             store.set_active_transcript_version(meeting_id, version_id)
+        reprocess_jobs.check_cancelled(job_id)
         reprocess_jobs.set(
             job_id,
             status="done",
@@ -1879,6 +1883,7 @@ async def reprocess_asr_version(
             created_speakers=created_total,
         )
     except ReprocessCancelled:
+        restore_speaker_snapshot(store, meeting_id, speaker_snapshot)
         reprocess_jobs.mark_cancelled(job_id, meeting_id, version_id, inserted_total)
     except Exception as exc:
         try:
@@ -1906,12 +1911,14 @@ async def reprocess_speaker_version(
     created_total = 0
     assigned_total = 0
     errors: list[str] = []
+    speaker_snapshot = None
     try:
         reprocess_jobs.check_cancelled(job_id)
         store.delete_segments_for_version(meeting_id, version_id)
         store.update_transcript_version_status(meeting_id, version_id, "running")
         reprocess_jobs.check_cancelled(job_id)
         if reset_speakers:
+            speaker_snapshot = capture_speaker_snapshot(store, meeting_id)
             store.delete_speakers(meeting_id)
 
         meeting = store.get_meeting(meeting_id)
@@ -1963,6 +1970,8 @@ async def reprocess_speaker_version(
             }
             if use_speaker_tracking:
                 reprocess_jobs.check_cancelled(job_id)
+                if speaker_snapshot is None:
+                    speaker_snapshot = capture_speaker_snapshot(store, meeting_id)
                 assigned_segments, speaker_result = await asyncio.to_thread(
                     speaker_tracker.assign_segments,
                     store,
@@ -2009,6 +2018,7 @@ async def reprocess_speaker_version(
         reprocess_jobs.check_cancelled(job_id)
         if make_current:
             store.set_active_transcript_version(meeting_id, version_id)
+        reprocess_jobs.check_cancelled(job_id)
         reprocess_jobs.set(
             job_id,
             status="done",
@@ -2020,6 +2030,7 @@ async def reprocess_speaker_version(
             error="; ".join(errors[:2]) if errors else "",
         )
     except ReprocessCancelled:
+        restore_speaker_snapshot(store, meeting_id, speaker_snapshot)
         reprocess_jobs.mark_cancelled(job_id, meeting_id, version_id, inserted_total)
     except Exception as exc:
         try:

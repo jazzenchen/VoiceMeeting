@@ -1198,6 +1198,33 @@ class MeetingStore:
                 (now_iso(), meeting_id),
             )
 
+    def replace_speakers(self, meeting_id: str, speakers: List[Dict[str, Any]]) -> None:
+        stamp = now_iso()
+        with self._lock, self._connect() as conn:
+            conn.execute("DELETE FROM speakers WHERE meeting_id = ?", (meeting_id,))
+            for speaker in speakers:
+                speaker_id = str(speaker.get("id") or uuid.uuid4().hex)
+                conn.execute(
+                    """
+                    INSERT INTO speakers
+                    (id, meeting_id, label, embedding_json, sample_count, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        speaker_id,
+                        meeting_id,
+                        str(speaker.get("label") or ""),
+                        json.dumps(speaker.get("embedding") or []),
+                        int(speaker.get("sample_count") or 0),
+                        speaker.get("created_at") or stamp,
+                        speaker.get("updated_at") or stamp,
+                    ),
+                )
+            conn.execute(
+                "UPDATE meetings SET updated_at = ? WHERE id = ?",
+                (stamp, meeting_id),
+            )
+
     def create_speaker(self, meeting_id: str, embedding: List[float]) -> Dict[str, Any]:
         existing = self.list_speakers(meeting_id)
         label = f"Speaker {len(existing) + 1}"
