@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from .summarizer import (
-    MeetingSummarizer,
+from .meeting_titles import (
     is_generic_meeting_title,
     local_title_from_content,
     retitle_final_markdown,
 )
+from .summarizer import MeetingSummarizer
 
 
 async def prepare_final_markdown_for_storage(

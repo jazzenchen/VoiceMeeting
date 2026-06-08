@@ -6,7 +6,19 @@ from datetime import datetime
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from .llm import friendly_llm_error
+from .meeting_titles import (
+    clean_generated_title,
+    is_generic_meeting_title,
+    local_title_from_content,
+    notes_only_markdown,
+    retitle_final_markdown,
+)
 from .storage import DEFAULT_SUMMARY
+from .text_cleanup import (
+    clean_inline_text as _clean_inline_text,
+    shorten_text as _shorten_item,
+    strip_markdown_fence as _strip_markdown_fence,
+)
 from .transcript import UNRECOGNIZED_TEXT, is_unrecognized_text
 from .vibearound import VibeAroundClient
 
@@ -110,16 +122,6 @@ ACTION_TERMS = (
 )
 
 QUESTION_TERMS = ("吗", "什么", "哪些", "如何", "怎么", "是否", "?")
-GENERIC_MEETING_TITLES = {
-    "今天的会议",
-    "新会议",
-    "新会议标题",
-    "untitled meeting",
-    "meeting",
-    "会议纪要",
-    "导入音频",
-    "导入音视频",
-}
 
 
 REPAIR_PROMPT = """
@@ -229,44 +231,6 @@ def _normalize_summary(data: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
-def _clean_inline_text(text: str) -> str:
-    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
-    cleaned = re.sub(r"([A-Za-z0-9])\1{7,}", r"\1", cleaned)
-    return cleaned
-
-
-def is_generic_meeting_title(title: Any) -> bool:
-    cleaned = _clean_inline_text(str(title or "")).strip(" #「」\"'“”‘’")
-    return not cleaned or cleaned.lower() in GENERIC_MEETING_TITLES
-
-
-def clean_generated_title(title: Any, limit: int = 20) -> str:
-    cleaned = _clean_inline_text(str(title or ""))
-    cleaned = _strip_markdown_fence(cleaned)
-    cleaned = re.sub(r"^#+\s*", "", cleaned).strip()
-    cleaned = re.sub(r"^(会议标题|标题)\s*[:：]\s*", "", cleaned).strip()
-    cleaned = cleaned.strip(" #「」\"'“”‘’《》[]【】")
-    if not cleaned or is_generic_meeting_title(cleaned):
-        return ""
-    cleaned = re.sub(r"(会议纪要|会议|纪要)$", "", cleaned).strip()
-    cleaned = re.sub(r"[。.!！?？,，;；:：、]+$", "", cleaned).strip()
-    if not cleaned or is_generic_meeting_title(cleaned):
-        return ""
-    return cleaned[:limit].strip()
-
-
-def retitle_final_markdown(markdown: str, title: str) -> str:
-    clean_title = clean_generated_title(title)
-    if not clean_title:
-        return markdown
-    text = str(markdown or "").strip()
-    if re.match(r"^#\s+.+$", text, flags=re.M):
-        text = re.sub(r"^#\s+.+$", f"# {clean_title}", text, count=1, flags=re.M)
-    else:
-        text = f"# {clean_title}\n\n{text}"
-    return text.rstrip() + "\n"
-
-
 def _is_unrecognized_segment(item: Dict[str, Any]) -> bool:
     return is_unrecognized_text(item.get("text")) or is_unrecognized_text(item.get("raw_text"))
 
@@ -341,13 +305,6 @@ def _select_key_sentences(sentences: List[str], limit: int = 5) -> List[str]:
     return [sentences[index] for index in selected_indexes]
 
 
-def _shorten_item(text: str, limit: int = 72) -> str:
-    cleaned = _clean_inline_text(text).strip("，,。；; ")
-    if len(cleaned) <= limit:
-        return cleaned
-    return cleaned[:limit].rstrip("，,。；; ") + "..."
-
-
 def _topic_items(sentences: List[str]) -> List[str]:
     topics: List[str] = []
     seen: set[str] = set()
@@ -403,43 +360,10 @@ def summary_needs_local_rebuild(summary: Dict[str, Any]) -> bool:
     ) or "LLM 暂不可用" in risks or "timed out" in risks.lower()
 
 
-def _strip_markdown_fence(text: str) -> str:
-    cleaned = str(text or "").strip()
-    fence = re.search(r"```(?:markdown|md)?\s*(.*?)```", cleaned, flags=re.S | re.I)
-    if fence:
-        return fence.group(1).strip()
-    return cleaned
-
-
 def _trim_generated_markdown(text: str) -> str:
     cleaned = _strip_markdown_fence(text)
     cleaned = re.sub(r"\n+##\s*原始转写\s*.*$", "", cleaned, flags=re.S)
     return cleaned.strip()
-
-
-def notes_only_markdown(markdown: str) -> str:
-    return _trim_generated_markdown(markdown)
-
-
-def local_title_from_content(meeting: Dict[str, Any], markdown: str = "") -> str:
-    candidates: List[str] = []
-    for line in notes_only_markdown(markdown).splitlines():
-        cleaned = _clean_inline_text(line)
-        if not cleaned or cleaned.startswith("#") or cleaned.startswith("- 时间"):
-            continue
-        cleaned = re.sub(r"^[-*]\s+", "", cleaned).strip()
-        if cleaned in {"暂无", "无", "待确认"} or cleaned.endswith("："):
-            continue
-        candidates.append(cleaned)
-
-    if not candidates:
-        candidates = _candidate_sentences(meeting.get("utterances") or meeting.get("segments", []), max_items=80)
-
-    for candidate in candidates:
-        title = clean_generated_title(_shorten_item(candidate, 20))
-        if title:
-            return title
-    return ""
 
 
 def _has_heading(markdown: str, heading: str) -> bool:

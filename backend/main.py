@@ -47,6 +47,7 @@ from .diarization import (
 )
 from .llm import LLMManager
 from .final_notes import prepare_final_markdown_for_storage
+from .meeting_titles import notes_only_markdown
 from .meeting_audio import (
     cleanup_chunk_audio_files,
     ensure_meeting_audio,
@@ -86,7 +87,6 @@ from .summarizer import (
     build_local_markdown,
     build_transcript_markdown,
     fallback_incremental_summary,
-    notes_only_markdown,
 )
 from .transcript import build_utterances, is_unrecognized_text
 from .transcript_source import (
