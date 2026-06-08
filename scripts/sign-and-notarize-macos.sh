@@ -6,7 +6,7 @@ cd "$ROOT"
 
 SOURCE_APP="${1:-$ROOT/tauri/src-tauri/target/release/bundle/macos/VoiceMeeting.app}"
 OUTPUT_DIR="$ROOT/tauri/src-tauri/target/release/bundle/dmg"
-DMG_PATH="$OUTPUT_DIR/VoiceMeeting_0.0.2_aarch64.dmg"
+DMG_PATH="$OUTPUT_DIR/VoiceMeeting_0.0.3_aarch64.dmg"
 WORK_ROOT="${TMPDIR:-/tmp}/VoiceMeeting-signing"
 WORK_APP="$WORK_ROOT/VoiceMeeting.app"
 APP_ZIP_PATH="$WORK_ROOT/VoiceMeeting.app.zip"
@@ -229,7 +229,7 @@ find "$DMG_STAGING" -name '._*' -delete
 
 echo "Creating DMG..."
 hdiutil create \
-  -volname "VoiceMeeting-0_0_2" \
+  -volname "VoiceMeeting-0_0_3" \
   -srcfolder "$DMG_STAGING" \
   -ov \
   -format UDZO \
