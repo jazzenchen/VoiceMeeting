@@ -109,6 +109,12 @@ function globalPlaybackShortcutTarget(target) {
   ].join(",")));
 }
 
+const REPROCESS_ACTIVE_STATUSES = new Set(["queued", "running", "cancelling"]);
+
+function reprocessActive(job) {
+  return REPROCESS_ACTIVE_STATUSES.has(job?.status);
+}
+
 function App() {
   const [meeting, setMeeting] = useState(null);
   const [meetings, setMeetings] = useState([]);
@@ -158,6 +164,7 @@ function App() {
   const [downloadBusy, setDownloadBusy] = useState("");
   const [playing, setPlaying] = useState(false);
   const [playbackBusy, setPlaybackBusy] = useState(false);
+  const [processingStopBusy, setProcessingStopBusy] = useState(false);
   const [playbackStatus, setPlaybackStatus] = useState("未播放");
   const [playbackMeetingId, setPlaybackMeetingId] = useState(null);
   const [playbackPositionMs, setPlaybackPositionMs] = useState(null);
@@ -198,6 +205,7 @@ function App() {
   const stopRequestedRef = useRef(false);
   const uploadChainRef = useRef(Promise.resolve());
   const activeUploadControllersRef = useRef(new Set());
+  const finalizeControllerRef = useRef(null);
   const firstSpeechFlushDoneRef = useRef(false);
   const preSpeechFramesRef = useRef([]);
   const preSpeechProbeRef = useRef(null);
@@ -400,10 +408,10 @@ function App() {
   const activeChunks = displayRuntimeStatus?.active_chunks || [];
   const reprocessRuntime = runtimeStatus?.reprocess || null;
   const notesReprocessWorking = (
-    reprocessRuntime?.level === "notes" && ["queued", "running"].includes(reprocessRuntime?.status)
+    reprocessRuntime?.level === "notes" && reprocessActive(reprocessRuntime)
   );
   const finalNotesWorking = finalizing || notesReprocessWorking;
-  const reprocessWorking = reprocessBusy || ["queued", "running"].includes(reprocessRuntime?.status);
+  const reprocessWorking = reprocessBusy || reprocessActive(reprocessRuntime);
   const asrWorking = pendingChunks > 0 || activeChunks.length > 0 || reprocessWorking;
   const normalizedRecordingConfig = clampRecordingConfig(recordingConfig);
   const selectedAsrModelMeta = modelCatalogByKey.get(`asr:${normalizedRecordingConfig.asrModel}`);
@@ -1174,7 +1182,7 @@ function App() {
       const id = meeting?.id;
       if (!id || !versionId || versionId === "auto") return;
       const version = (meeting?.transcript_versions || []).find((item) => item.id === versionId);
-      if (["queued", "running"].includes(version?.status)) return;
+      if (["queued", "running", "cancelling"].includes(version?.status)) return;
       const label = transcriptVersionOption(version || { id: versionId });
       if (!window.confirm(`删除稿件：${label}？`)) return;
       setError("");
@@ -1468,7 +1476,7 @@ function App() {
   useEffect(() => {
     const job = runtimeStatus?.reprocess;
     const id = meeting?.id;
-    if (!id || !job || !["done", "error"].includes(job.status)) return;
+    if (!id || !job || !["done", "error", "cancelled"].includes(job.status)) return;
     const key = `${id}:${job.id || ""}:${job.version_id || ""}:${job.status || ""}:${job.updated_at || ""}`;
     if (completedReprocessRef.current === key) return;
     completedReprocessRef.current = key;
@@ -1477,6 +1485,10 @@ function App() {
     if (job.status === "error") {
       setPipelineStatus("处理失败");
       setError(userFriendlyError(job.error));
+      return;
+    }
+    if (job.status === "cancelled") {
+      setPipelineStatus("已停止");
       return;
     }
     const doneLabels = {
@@ -1833,6 +1845,8 @@ function App() {
     setFinalizing(true);
     setFinalNotesError("");
     setStreamingFinalMarkdown("");
+    const controller = new AbortController();
+    finalizeControllerRef.current = controller;
     try {
       await uploadChainRef.current;
       setPipelineStatus("最终纪要生成中");
@@ -1840,6 +1854,7 @@ function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ force_local: false }),
+        signal: controller.signal,
       });
       if (!response.ok) {
         const text = await response.text();
@@ -1877,12 +1892,22 @@ function App() {
       setPipelineStatus("完成");
       await refreshMeetings();
     } catch (err) {
+      if (err?.name === "AbortError") {
+        setStreamingFinalMarkdown("");
+        setPipelineStatus("已停止");
+        setFinalNotesError("");
+        return;
+      }
       const message = userFriendlyError(err.message);
       setStreamingFinalMarkdown("");
       setPipelineStatus("生成失败");
       setFinalNotesError(message);
     } finally {
+      if (finalizeControllerRef.current === controller) {
+        finalizeControllerRef.current = null;
+      }
       setFinalizing(false);
+      setProcessingStopBusy(false);
     }
   }, [finalizing, llmReady, llmUnavailableReason, recording, refreshMeeting, refreshMeetings]);
 
@@ -1949,6 +1974,53 @@ function App() {
       await runFinalize(stoppedMeetingId, { allowWhileRecording: true });
     }
   }, [closeActiveSegment, closePreSpeechProbe, recording, refreshMeeting, refreshMeetings, runFinalize]);
+
+  const stopProcessing = useCallback(async () => {
+    const id = meetingIdRef.current || meeting?.id;
+    const reprocess = runtimeStatus?.reprocess;
+    const canCancelReprocess = Boolean(id && reprocess?.id && reprocessActive(reprocess));
+    const abortUploads = activeUploadControllersRef.current.size > 0 || pendingChunks > 0;
+    const abortFinalize = Boolean(finalizeControllerRef.current) || finalizing;
+    const waitForLocalStop = importingAudio || abortFinalize;
+    if (!importingAudio && !canCancelReprocess && !abortUploads && !abortFinalize) return;
+
+    setProcessingStopBusy(true);
+    setError("");
+    stopRequestedRef.current = true;
+    if (importingAudio) {
+      setPipelineStatus("正在停止导入");
+    } else if (abortFinalize) {
+      setPipelineStatus("正在停止纪要");
+    } else {
+      setPipelineStatus("正在停止处理");
+    }
+
+    for (const controller of activeUploadControllersRef.current) {
+      controller.abort();
+    }
+    finalizeControllerRef.current?.abort();
+
+    try {
+      if (canCancelReprocess && reprocess.status !== "cancelling") {
+        const data = await api(`/api/meetings/${id}/reprocess/${reprocess.id}/cancel`, { method: "POST" });
+        if (data.job) {
+          setRuntimeStatus((current) => ({ ...(current || {}), reprocess: data.job }));
+        }
+      }
+    } catch (err) {
+      setError(userFriendlyError(err.message));
+    } finally {
+      if (!waitForLocalStop) {
+        setProcessingStopBusy(false);
+      }
+    }
+  }, [
+    finalizing,
+    importingAudio,
+    meeting?.id,
+    pendingChunks,
+    runtimeStatus?.reprocess,
+  ]);
 
   const finalize = useCallback(async () => {
     const id = meetingIdRef.current || meeting?.id;
@@ -2431,7 +2503,7 @@ function App() {
       if (!file) return;
       if (importingAudio) return;
       if (recording) {
-        setError("录音中不能导入音频，请先停止当前录音。");
+        setError("录音中不能导入音视频，请先停止当前录音。");
         return;
       }
       if (!serviceReady) {
@@ -2445,11 +2517,11 @@ function App() {
         return;
       }
       setError("");
-      setPipelineStatus("准备导入音频");
+      setPipelineStatus("准备导入音视频");
+      stopRequestedRef.current = false;
       try {
         if (!(await ensureRecordingModels())) return;
         setImportingAudio(true);
-        stopRequestedRef.current = false;
         const importedTitle = titleFromAudioFile(file);
         let id = null;
         if (!id) {
@@ -2466,15 +2538,27 @@ function App() {
 
         const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
         if (!AudioContextCtor) {
-          throw new Error("当前浏览器不支持读取这个音频文件。");
+          throw new Error("当前浏览器不支持读取这个音视频文件。");
         }
         const context = new AudioContextCtor();
         const audioBuffer = await context.decodeAudioData(await file.arrayBuffer());
         await context.close();
+        if (stopRequestedRef.current) {
+          setPipelineStatus("已停止");
+          await refreshMeeting(id);
+          await refreshMeetings();
+          return;
+        }
         const samples = audioBufferToMono(audioBuffer);
         const slicedChunks = makeVadChunks(samples, audioBuffer.sampleRate, recordingConfigRef.current);
         chunkSeqRef.current = 0;
         setPipelineStatus(`正在整理音频 · ${slicedChunks.length} 段`);
+        if (stopRequestedRef.current) {
+          setPipelineStatus("已停止");
+          await refreshMeeting(id);
+          await refreshMeetings();
+          return;
+        }
         if (slicedChunks.length === 0) {
           setPipelineStatus("未检测到人声");
           await refreshMeeting(id);
@@ -2482,6 +2566,7 @@ function App() {
           return;
         }
         for (const item of slicedChunks) {
+          if (stopRequestedRef.current) break;
           chunkSeqRef.current += 1;
           const blob = encodeWav(item.samples, audioBuffer.sampleRate);
           await enqueueChunk(blob, item.endedAtMs - item.startedAtMs, {
@@ -2490,14 +2575,23 @@ function App() {
             endedAtMs: item.endedAtMs,
             cutReason: item.cutReason,
           });
+          if (stopRequestedRef.current) break;
+        }
+        if (stopRequestedRef.current) {
+          setPipelineStatus("已停止");
         }
         await refreshMeeting(id);
         await refreshMeetings();
       } catch (err) {
+        if (err?.name === "AbortError") {
+          setPipelineStatus("已停止");
+          return;
+        }
         setPipelineStatus("导入失败");
         setError(userFriendlyError(err.message));
       } finally {
         setImportingAudio(false);
+        setProcessingStopBusy(false);
       }
     },
     [
@@ -2620,8 +2714,10 @@ function App() {
         recognitionUnavailableReason={asrUnavailableReason}
         busy={busy}
         importingAudio={importingAudio}
+        processingStopBusy={processingStopBusy}
         startMeeting={startMeeting}
         stopRecording={stopRecording}
+        stopProcessing={stopProcessing}
         uploadAudioFile={uploadAudioFile}
         runtimeStatus={displayRuntimeStatus}
         pendingChunks={pendingChunks}

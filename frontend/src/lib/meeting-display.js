@@ -140,7 +140,9 @@ export function transcriptVersionOption(version, t = (value) => value) {
   const time = formatTime(version?.created_at);
   const statusText = version?.status === "error"
     ? t("失败")
-    : ["queued", "running"].includes(version?.status)
+    : version?.status === "cancelled"
+      ? t("已取消")
+    : ["queued", "running", "cancelling"].includes(version?.status)
       ? t("处理中")
       : "";
   return [t(name), time, statusText].filter(Boolean).join(" · ");
@@ -250,6 +252,9 @@ function chunkStageLabel(statusValue) {
 
 export function runtimeLine(runtime, pendingChunks, t = (value, values) => value) {
   const reprocess = runtime?.reprocess;
+  if (reprocess && reprocess.status === "cancelling") {
+    return t("停止处理中");
+  }
   if (reprocess && ["queued", "running"].includes(reprocess.status)) {
     if (String(reprocess.level || "") === "repair") {
       return t("自动校对文字中");

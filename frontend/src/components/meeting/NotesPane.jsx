@@ -97,7 +97,7 @@ export function NotesPane({
             ) : hasContent ? (
               <p>{t("已捕捉 {count} 条转写内容。点击“生成纪要”后会基于完整文字稿生成 Markdown 纪要。", { count: transcriptPartsList.length })}</p>
             ) : (
-              <p>{t("会议纪要将在录音或导入音频后生成。")}</p>
+              <p>{t("会议纪要将在录音或导入音视频后生成。")}</p>
             )}
           </section>
         )}

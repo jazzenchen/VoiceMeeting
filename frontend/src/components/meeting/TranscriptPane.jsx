@@ -96,9 +96,9 @@ export function TranscriptPane({
   const selectedVersion = versions.find((version) => version.id === selectedVersionId) || activeTranscriptVersion;
   const canDeleteSelectedVersion = Boolean(
     selectedVersion
-      && selectedVersion.id
-      && selectedVersion.id !== "auto"
-      && !["queued", "running"].includes(selectedVersion.status),
+	      && selectedVersion.id
+	      && selectedVersion.id !== "auto"
+	      && !["queued", "running", "cancelling"].includes(selectedVersion.status),
   );
   const recognizedItems = useMemo(() => recognizedTranscriptItems(transcriptItems), [transcriptItems]);
   const hasRecognizedTranscript = recognizedItems.length > 0;

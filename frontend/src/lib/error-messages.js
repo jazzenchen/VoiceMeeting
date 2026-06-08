@@ -43,7 +43,7 @@ export function userFriendlyError(message) {
     return "请先创建可编辑副本，再修改文字或说话人。";
   }
   if (lower.includes("prompt cannot be empty")) return "请输入要生成的内容。";
-  if (lower.includes("no transcript or summary")) return "这场会议还没有可用内容，录音或导入音频后再试。";
+  if (lower.includes("no transcript or summary")) return "这场会议还没有可用内容，录音或导入音视频后再试。";
   if (lower.includes("timed out") || lower.includes("timeout")) return "生成时间太久，已停止等待。请稍后重试。";
   if (lower.includes("empty audio")) return "这段音频为空，请重新录制或导入。";
   if (lower.includes("unsupported asr language")) return "当前语言暂不支持，请换一种语言设置。";

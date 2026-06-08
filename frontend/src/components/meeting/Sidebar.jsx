@@ -75,8 +75,10 @@ export function Sidebar({
   busy,
   importingAudio,
   finalizing,
+  processingStopBusy,
   startMeeting,
   stopRecording,
+  stopProcessing,
   uploadAudioFile,
   runtimeStatus,
   pendingChunks,
@@ -91,8 +93,9 @@ export function Sidebar({
 }) {
   const { t } = useI18n();
   const reprocess = runtimeStatus?.reprocess;
-  const reprocessActive = Boolean(reprocess && ["queued", "running"].includes(reprocess.status));
-  const processing = pendingChunks > 0 || Boolean(runtimeStatus?.active_chunks?.length) || reprocessActive;
+  const reprocessActive = Boolean(reprocess && ["queued", "running", "cancelling"].includes(reprocess.status));
+  const processing = importingAudio || finalizing || pendingChunks > 0 || Boolean(runtimeStatus?.active_chunks?.length) || reprocessActive;
+  const stoppingProcessing = processingStopBusy || reprocess?.status === "cancelling";
   const interactionLocked = recording || busy || importingAudio || finalizing || processing;
   const recordingUnavailable = !serviceReady
     ? t("本地语音服务还在启动中，请稍候。")
@@ -124,6 +127,17 @@ export function Sidebar({
               </Button>
             </div>
           </>
+        ) : processing ? (
+          <Button
+            type="button"
+            className="new-rec-btn rec-stop"
+            onClick={stopProcessing}
+            disabled={stoppingProcessing}
+            title={stoppingProcessing ? t("停止中") : t("停止处理")}
+          >
+            <Square size={13} />
+            <span>{stoppingProcessing ? t("停止中") : t("停止处理")}</span>
+          </Button>
         ) : (
           <>
             <Button
@@ -138,10 +152,10 @@ export function Sidebar({
             </Button>
             <label
               className={`import-btn ${serviceReady && recognitionReady && !interactionLocked ? "" : "disabled"}`}
-              title={recordingUnavailable || t("导入音频文件")}
+              title={recordingUnavailable || t("导入音视频文件")}
             >
               <FileAudio size={13} />
-              <span>{importingAudio ? t("导入中") : t("导入音频文件")}</span>
+              <span>{importingAudio ? t("导入中") : t("导入音视频文件")}</span>
               <input
                 type="file"
                 accept="audio/*,video/*"

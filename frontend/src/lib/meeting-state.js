@@ -1,5 +1,5 @@
 export function titleFromAudioFile(file) {
-  const name = file?.name || "导入音频";
+  const name = file?.name || "导入音视频";
   return name.replace(/\.[^/.]+$/, "").trim() || name;
 }
 
@@ -9,7 +9,7 @@ export function notesOnlyMarkdown(markdown) {
 
 export function pipelineStepIndex(runtime, pendingChunks, pipelineStatus, finalizing, finalNotesWorking) {
   const reprocess = runtime?.reprocess;
-  if (reprocess && ["queued", "running"].includes(reprocess.status)) {
+  if (reprocess && ["queued", "running", "cancelling"].includes(reprocess.status)) {
     const level = String(reprocess.level || "");
     if (level === "notes") return 4;
     if (level === "speaker") return 3;
