@@ -894,7 +894,7 @@ def editable_active_version_id(meeting_id: str) -> str:
     if version.get("kind") != "manual-edit":
         raise HTTPException(
             status_code=409,
-            detail="请先创建可编辑副本，再修改文字或说话人。",
+            detail="请先进入手动编辑，再修改文字或说话人。",
         )
     return str(version.get("id") or "auto")
 
@@ -1006,7 +1006,7 @@ async def start_reprocess_job(
         store.create_transcript_version(
             meeting_id=meeting_id,
             version_id=version_id,
-            label=f"重新整理 {stamp}",
+            label=f"重新识别 {stamp}",
             kind="asr",
             settings={
                 "model": requested_model,
@@ -1104,7 +1104,7 @@ async def start_reprocess_job(
         store.create_transcript_version(
             meeting_id=meeting_id,
             version_id=version_id,
-            label=f"LLM 精修 {stamp}",
+            label=f"转写校准 {stamp}",
             kind="llm-repair",
             settings={"source_version_id": source_version_id},
             parent_version_id=source_version_id,
@@ -2084,7 +2084,7 @@ async def reprocess_llm_repair_version(
         reprocess_jobs.set(
             job_id,
             status="running",
-            stage="LLM 精修",
+            stage="转写校准",
             progress=0,
             total=len(batches),
         )
@@ -2093,7 +2093,7 @@ async def reprocess_llm_repair_version(
             reprocess_jobs.check_cancelled(job_id)
             reprocess_jobs.set(
                 job_id,
-                stage=f"精修 {index}/{len(batches)}",
+                stage=f"校准 {index}/{len(batches)}",
                 progress=index - 1,
                 total=len(batches),
             )

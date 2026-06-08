@@ -176,26 +176,26 @@ export function TranscriptPane({
   const advancedActions = [
     {
       key: "asr",
-      label: t("重新整理文字"),
+      label: t("重新识别"),
       icon: <RefreshCcw size={15} />,
       disabled: !meeting || !recognitionReady || reprocessWorking,
-      title: recognitionUnavailableReason || t("重新整理文字"),
+      title: recognitionUnavailableReason || t("重新识别"),
       onSelect: () => startReprocess("asr"),
     },
     {
       key: "repair",
-      label: t("自动校对文字"),
+      label: t("转写校准"),
       icon: <Sparkles size={15} />,
       disabled: !meeting || reprocessWorking || !hasRecognizedTranscript,
-      title: t("自动校对文字"),
+      title: t("转写校准"),
       onSelect: () => startReprocess("repair"),
     },
     {
       key: "editable",
-      label: t("编辑副本"),
+      label: t("手动编辑"),
       icon: <FilePenLine size={15} />,
       disabled: !meeting || editableVersion || reprocessWorking || !hasRecognizedTranscript,
-      title: editableVersion ? t("当前已经是可编辑稿") : t("创建可编辑副本"),
+      title: editableVersion ? t("当前已经是可编辑稿") : t("点击自动创建副本进行编辑"),
       onSelect: createEditableVersion,
     },
   ];
@@ -283,13 +283,13 @@ export function TranscriptPane({
                 type="button"
                 onClick={() => setToolsOpen((value) => !value)}
                 disabled={!meeting}
-                title={t("文字工具")}
-                aria-label={t("文字工具")}
+                title={t("后处理")}
+                aria-label={t("后处理")}
                 aria-haspopup="menu"
                 aria-expanded={toolsOpen}
               >
                 <CircleEllipsis size={15} />
-                <span>{t("文字工具")}</span>
+                <span>{t("后处理")}</span>
               </button>
               {toolsOpen && (
                 <div className="transcript-action-dropdown" role="menu">
@@ -462,7 +462,7 @@ export function TranscriptPane({
                         <button
                           className={`segment-action-button ${editableVersion ? "" : "muted"}`}
                           onClick={(event) => startEditSegment(event, segment)}
-                          title={editableVersion ? t("编辑这段文字") : t("请先创建可编辑副本")}
+                          title={editableVersion ? t("编辑这段文字") : t("请先进入手动编辑")}
                         >
                           <Pencil size={13} />
                         </button>

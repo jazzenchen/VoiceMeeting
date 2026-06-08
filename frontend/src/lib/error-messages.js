@@ -40,7 +40,7 @@ export function userFriendlyError(message) {
   if (lower.includes("segment not found")) return "找不到这段文字，请刷新后再试。";
   if (lower.includes("speaker not found")) return "当前稿件里没有找到这个说话人。";
   if (lower.includes("manual edit version") || lower.includes("editable")) {
-    return "请先创建可编辑副本，再修改文字或说话人。";
+    return "请先进入手动编辑，再修改文字或说话人。";
   }
   if (lower.includes("prompt cannot be empty")) return "请输入要生成的内容。";
   if (lower.includes("no transcript or summary")) return "这场会议还没有可用内容，录音或导入音视频后再试。";

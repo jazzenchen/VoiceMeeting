@@ -168,8 +168,8 @@ DEFAULT_PROMPT_META = [
     },
     {
         "key": "transcript_repair",
-        "label": "文字校对",
-        "description": "用于“自动校对文字”，只应修正明显转写错误，不应改写事实。",
+        "label": "转写校准提示词",
+        "description": "用于“转写校准”，只应修正明显转写错误，不应改写事实。",
     },
     {
         "key": "final_notes",

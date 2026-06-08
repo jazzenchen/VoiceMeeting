@@ -1198,10 +1198,10 @@ function App() {
         return;
       }
       const labels = {
-        asr: "重新整理文字",
+        asr: "重新识别",
         speaker: "重新分离说话人",
         merge: "按人声整理段落",
-        repair: "自动校对文字",
+        repair: "转写校准",
         notes: "纪要重写",
       };
       setReprocessBusy(true);
@@ -1263,7 +1263,7 @@ function App() {
         body: JSON.stringify({ source_version_id: meeting.active_version_id || "auto" }),
       });
       setMeeting(updated);
-      setPipelineStatus("已创建可编辑副本");
+      setPipelineStatus("已创建手动编辑副本");
       await refreshMeetings();
     } catch (err) {
       setError(userFriendlyError(err.message));
@@ -1277,7 +1277,7 @@ function App() {
       event.stopPropagation();
       if (isUnrecognizedTranscriptItem(segment)) return;
       if (!editableVersion) {
-        setError("请先创建可编辑副本，再修改文字。");
+        setError("请先进入手动编辑，再修改文字。");
         return;
       }
       const drafts = {};
@@ -1357,7 +1357,7 @@ function App() {
     const to = speakerRenameTo.trim();
     if (!id || !from || !to || editBusy) return;
     if (!editableVersion) {
-      setError("请先创建可编辑副本，再修改说话人名称。");
+      setError("请先进入手动编辑，再修改说话人名称。");
       return;
     }
     setEditBusy(true);
@@ -1473,10 +1473,10 @@ function App() {
       return;
     }
     const doneLabels = {
-      asr: "文字整理已完成",
+      asr: "重新识别已完成",
       speaker: "说话人分离已完成",
       merge: "按人声整理已完成",
-      repair: "自动校对文字已完成",
+      repair: "转写校准已完成",
       notes: "纪要已更新",
     };
     setPipelineStatus(doneLabels[job.level] || "处理已完成");

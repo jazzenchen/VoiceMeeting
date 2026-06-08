@@ -125,10 +125,10 @@ export function transcriptVersionName(version, fallbackId = "auto") {
   const kind = version?.kind || (fallbackId === "auto" ? "initial" : "");
   const names = {
     initial: "原始稿",
-    asr: "重新整理稿",
+    asr: "重新识别稿",
     speaker: "说话人分离稿",
     merge: "人声整理稿",
-    "llm-repair": "文字精修稿",
+    "llm-repair": "转写校准稿",
     "manual-edit": "手动修改稿",
     manual: "手动稿",
   };
@@ -257,7 +257,7 @@ export function runtimeLine(runtime, pendingChunks, t = (value, values) => value
   }
   if (reprocess && ["queued", "running"].includes(reprocess.status)) {
     if (String(reprocess.level || "") === "repair") {
-      return t("自动校对文字中");
+      return t("转写校准中");
     }
     const total = Number(reprocess.total);
     const progress = Number(reprocess.progress);

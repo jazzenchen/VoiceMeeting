@@ -674,7 +674,7 @@ function PromptSettingsPanel({
       <div className="settings-section-head">
         <div>
           <h3>{t("系统提示词")}</h3>
-          <p>{t("系统提示词会影响 ASR 上下文、文字校对、纪要生成和问答。")}</p>
+          <p>{t("系统提示词会影响 ASR 上下文、转写校准、纪要生成和问答。")}</p>
         </div>
         <button
           type="button"
