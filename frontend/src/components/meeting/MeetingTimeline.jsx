@@ -181,8 +181,11 @@ export function MeetingTimeline({
     waveformChunks,
   ]);
 
-  const bars = useMemo(() => (
-    Array.from({ length: WAVEFORM_BAR_COUNT }, (_, index) => {
+  const bars = useMemo(() => {
+    if (!liveMode && waveformLoading && !audioWaveform) return [];
+    if (!liveMode && !audioWaveform && !parts.length) return [];
+
+    return Array.from({ length: WAVEFORM_BAR_COUNT }, (_, index) => {
       if (liveMode) {
         const amplitude = Number(liveBars[index]);
         const active = Number.isFinite(amplitude) && amplitude > 0;
@@ -223,8 +226,8 @@ export function MeetingTimeline({
         hasAudio: Boolean(audioBin?.hasAudio),
         speakerIndex,
       };
-    })
-  ), [audioWaveform, durationMs, liveBars, liveMode, parts, speakerIndexByName]);
+    });
+  }, [audioWaveform, durationMs, liveBars, liveMode, parts, speakerIndexByName, waveformLoading]);
 
   const jumpBy = (direction) => {
     if (!canNavigate) return;

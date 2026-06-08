@@ -292,6 +292,15 @@ function updateLoadingProgress(runtime, loadingProgress) {
 }
 
 function updateBars(runtime, bars = [], loadingProgress = 0) {
+  if (!bars.length) {
+    for (const mesh of runtime.barMeshes.values()) {
+      mesh.count = 0;
+      mesh.visible = false;
+    }
+    updateLoadingProgress(runtime, loadingProgress);
+    return;
+  }
+
   const meshes = ensureBarMeshes(runtime, bars.length);
   const offsets = new Map(BAR_GROUP_KEYS.map((key) => [key, 0]));
   const count = Math.max(1, bars.length);
