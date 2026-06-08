@@ -17,6 +17,14 @@ async function decodeAudioFile(file) {
   }
 }
 
+async function stopImportedMeeting(id, { refreshMeeting, refreshMeetings, setMeeting }) {
+  const stopped = await api(`/api/meetings/${id}/stop`, { method: "POST" });
+  setMeeting(stopped);
+  await refreshMeeting(id);
+  await refreshMeetings();
+  return stopped;
+}
+
 export function useAudioFileImport({
   asrReady,
   asrUnavailableReason,
@@ -81,8 +89,7 @@ export function useAudioFileImport({
         const audioBuffer = await decodeAudioFile(file);
         if (stopRequestedRef.current) {
           setPipelineStatus("已停止");
-          await refreshMeeting(id);
-          await refreshMeetings();
+          await stopImportedMeeting(id, { refreshMeeting, refreshMeetings, setMeeting });
           return;
         }
 
@@ -92,14 +99,12 @@ export function useAudioFileImport({
         setPipelineStatus(`正在整理音频 · ${slicedChunks.length} 段`);
         if (stopRequestedRef.current) {
           setPipelineStatus("已停止");
-          await refreshMeeting(id);
-          await refreshMeetings();
+          await stopImportedMeeting(id, { refreshMeeting, refreshMeetings, setMeeting });
           return;
         }
         if (slicedChunks.length === 0) {
           setPipelineStatus("未检测到人声");
-          await refreshMeeting(id);
-          await refreshMeetings();
+          await stopImportedMeeting(id, { refreshMeeting, refreshMeetings, setMeeting });
           return;
         }
 
@@ -118,9 +123,10 @@ export function useAudioFileImport({
 
         if (stopRequestedRef.current) {
           setPipelineStatus("已停止");
+        } else {
+          setPipelineStatus("已完成");
         }
-        await refreshMeeting(id);
-        await refreshMeetings();
+        await stopImportedMeeting(id, { refreshMeeting, refreshMeetings, setMeeting });
       } catch (err) {
         if (err?.name === "AbortError") {
           setPipelineStatus("已停止");
