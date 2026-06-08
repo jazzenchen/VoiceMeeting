@@ -55,6 +55,7 @@ from .meeting_audio import (
     meeting_audio_status,
     meeting_audio_waveform,
 )
+from .import_streaming import stream_import_events
 from .model_registry import (
     ASR_MODEL_CATALOG,
     FUNASR_MODEL_CATALOG,
@@ -1584,6 +1585,85 @@ async def upload_chunk(
         "speaker_tracking": transcription.speaker_tracking,
         "summary_status": "idle",
     }
+
+
+@app.post("/api/meetings/{meeting_id}/import/stream")
+async def import_meeting_stream(
+    meeting_id: str,
+    audio: UploadFile = File(...),
+    duration_ms: Optional[str] = Form(None),
+    language: Optional[str] = Form("mixed"),
+    asr_model: Optional[str] = Form(None),
+    speaker_mode: str = Form("voiceprint"),
+    client_chunk_id: str = Form(""),
+    started_at_ms: Optional[str] = Form(None),
+    ended_at_ms: Optional[str] = Form(None),
+    cut_reason: str = Form("导入完整音视频"),
+) -> StreamingResponse:
+    try:
+        store.get_meeting(meeting_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="找不到这场会议，可能已经被删除。")
+
+    active_recording_config = recording_config.read()
+    requested_language = str(active_recording_config.get("language") or language or "zh").strip().lower()
+    if requested_language not in SUPPORTED_ASR_LANGUAGES:
+        raise HTTPException(status_code=400, detail="当前语言暂不支持，请换一种语言设置。")
+    requested_model = normalize_asr_model(active_recording_config.get("asr_model") or asr_model)
+    requested_speaker_mode = resolve_speaker_mode(str(active_recording_config.get("speaker_mode") or speaker_mode))
+    try:
+        asr_engine = asr_runtime.require_loaded_engine(requested_model)
+    except ASRUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+    audio_bytes = await audio.read()
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="这段音频为空，请重新录制或导入。")
+
+    parsed_duration_ms = parse_optional_ms(duration_ms)
+    parsed_started_at_ms = parse_optional_ms(started_at_ms)
+    parsed_ended_at_ms = parse_optional_ms(ended_at_ms)
+    chunk = store.create_chunk(
+        meeting_id=meeting_id,
+        audio_bytes=audio_bytes,
+        filename=audio.filename or "imported-media",
+        mime_type=audio.content_type or "",
+        duration_ms=parsed_duration_ms,
+        client_chunk_id=client_chunk_id,
+        started_at_ms=parsed_started_at_ms if parsed_started_at_ms is not None else 0,
+        ended_at_ms=parsed_ended_at_ms,
+        cut_reason=cut_reason or "导入完整音视频",
+    )
+    chunk_id = str(chunk["id"])
+
+    async def event_stream() -> Any:
+        async for event, payload in stream_import_events(
+            meeting_id=meeting_id,
+            chunk_id=chunk_id,
+            parsed_duration_ms=int(parsed_duration_ms or 0),
+            requested_language=requested_language,
+            requested_model=requested_model,
+            requested_speaker_mode=requested_speaker_mode,
+            store=store,
+            asr_engine=asr_engine,
+            prepare_chunk_wav=prepare_chunk_wav,
+            meeting_runtime=meeting_runtime,
+            attach_audio_payload=attach_audio_payload,
+            ensure_single_meeting_audio=ensure_single_meeting_audio,
+            prompt_getter=prompt_settings.get,
+            diarizer_for_mode=diarizer_for_mode,
+            speaker_tracker=speaker_tracker,
+        ):
+            yield sse_event(event, payload)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 def prepare_chunk_wav(chunk: Dict[str, Any]) -> Path:

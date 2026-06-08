@@ -628,6 +628,13 @@ class MeetingStore:
                 (meeting_id, version_id),
             )
 
+    def delete_segments_for_chunk(self, meeting_id: str, version_id: str, chunk_id: str) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "DELETE FROM segments WHERE meeting_id = ? AND version_id = ? AND chunk_id = ?",
+                (meeting_id, version_id, chunk_id),
+            )
+
     def delete_transcript_version(self, meeting_id: str, version_id: str) -> Dict[str, Any]:
         if version_id == "auto":
             raise ValueError("原始稿不能删除。")

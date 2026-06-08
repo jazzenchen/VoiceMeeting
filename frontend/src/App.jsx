@@ -94,6 +94,40 @@ function reprocessActive(job) {
   return REPROCESS_ACTIVE_STATUSES.has(job?.status);
 }
 
+function audioUploadFilename(blob, metadata = {}) {
+  const sourceFilename = String(metadata.filename || blob?.name || "")
+    .split(/[\\/]/u)
+    .pop()
+    .trim();
+  const mimeType = String(blob?.type || "");
+  const extension = mimeType.includes("wav")
+    ? "wav"
+    : mimeType.includes("video/mp4") || mimeType.includes("mp4")
+      ? "mp4"
+      : mimeType.includes("aac")
+      ? "m4a"
+      : "webm";
+  return sourceFilename || `chunk-${Date.now()}.${extension}`;
+}
+
+function buildAudioUploadForm(blob, durationMs, metadata, activeConfig) {
+  const form = new FormData();
+  form.append("audio", blob, audioUploadFilename(blob, metadata));
+  form.append("duration_ms", String(Math.max(0, Math.round(durationMs))));
+  form.append("language", activeConfig.language);
+  form.append("asr_model", activeConfig.asrModel);
+  form.append("speaker_mode", activeConfig.speakerMode);
+  if (metadata.clientChunkId) form.append("client_chunk_id", metadata.clientChunkId);
+  if (Number.isFinite(metadata.startedAtMs)) {
+    form.append("started_at_ms", String(Math.max(0, Math.round(metadata.startedAtMs))));
+  }
+  if (Number.isFinite(metadata.endedAtMs)) {
+    form.append("ended_at_ms", String(Math.max(0, Math.round(metadata.endedAtMs))));
+  }
+  if (metadata.cutReason) form.append("cut_reason", metadata.cutReason);
+  return form;
+}
+
 function App() {
   const [meeting, setMeeting] = useState(null);
   const [meetings, setMeetings] = useState([]);
@@ -1492,31 +1526,7 @@ function App() {
       setPendingChunks((value) => value + 1);
       setPipelineStatus(asrReady ? "保存音频" : "准备语音识别");
       setError("");
-      const form = new FormData();
-      const sourceFilename = String(metadata.filename || blob.name || "")
-        .split(/[\\/]/u)
-        .pop()
-        .trim();
-      const extension = blob.type.includes("wav")
-        ? "wav"
-        : blob.type.includes("video/mp4") || blob.type.includes("mp4")
-          ? "mp4"
-          : blob.type.includes("aac")
-          ? "m4a"
-          : "webm";
-      form.append("audio", blob, sourceFilename || `chunk-${Date.now()}.${extension}`);
-      form.append("duration_ms", String(Math.max(0, Math.round(durationMs))));
-      form.append("language", activeConfig.language);
-      form.append("asr_model", activeConfig.asrModel);
-      form.append("speaker_mode", activeConfig.speakerMode);
-      if (metadata.clientChunkId) form.append("client_chunk_id", metadata.clientChunkId);
-      if (Number.isFinite(metadata.startedAtMs)) {
-        form.append("started_at_ms", String(Math.max(0, Math.round(metadata.startedAtMs))));
-      }
-      if (Number.isFinite(metadata.endedAtMs)) {
-        form.append("ended_at_ms", String(Math.max(0, Math.round(metadata.endedAtMs))));
-      }
-      if (metadata.cutReason) form.append("cut_reason", metadata.cutReason);
+      const form = buildAudioUploadForm(blob, durationMs, metadata, activeConfig);
       try {
         const data = await api(`/api/meetings/${id}/chunks`, {
           method: "POST",
@@ -1543,6 +1553,36 @@ function App() {
         }
         setPipelineStatus("处理失败");
         setError(userFriendlyError(err.message));
+      } finally {
+        activeUploadControllersRef.current.delete(controller);
+        setPendingChunks((value) => Math.max(0, value - 1));
+      }
+    },
+    [asrReady],
+  );
+
+  const streamImportFile = useCallback(
+    async (blob, durationMs, metadata = {}, handlers = {}) => {
+      const id = meetingIdRef.current;
+      if (!id || !blob || blob.size === 0) return;
+      const activeConfig = clampRecordingConfig(recordingConfigRef.current);
+      const controller = new AbortController();
+      activeUploadControllersRef.current.add(controller);
+      setPendingChunks((value) => value + 1);
+      setPipelineStatus(asrReady ? "保存音频" : "准备语音识别");
+      setError("");
+      const form = buildAudioUploadForm(blob, durationMs, metadata, activeConfig);
+      try {
+        const response = await fetch(apiUrl(`/api/meetings/${id}/import/stream`), {
+          method: "POST",
+          body: form,
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(userFriendlyError(text || `${response.status} ${response.statusText}`));
+        }
+        await readSse(response, handlers);
       } finally {
         activeUploadControllersRef.current.delete(controller);
         setPendingChunks((value) => Math.max(0, value - 1));
@@ -2114,12 +2154,20 @@ function App() {
     [deleteTarget?.id, playbackMeetingId, refreshMeetings, resetPlaybackState],
   );
 
+  const finalizeImportedMeeting = useCallback(
+    async (id) => {
+      if (!llmReady) return;
+      await runFinalize(id);
+    },
+    [llmReady, runFinalize],
+  );
+
   const uploadAudioFile = useAudioFileImport({
     asrReady,
     asrUnavailableReason,
     chunkSeqRef,
-    enqueueChunk,
     ensureRecordingModels,
+    finalizeImportedMeeting,
     importingAudio,
     meetingIdRef,
     recording,
@@ -2132,10 +2180,12 @@ function App() {
     setMeeting,
     setPipelineStatus,
     setProcessingStopBusy,
+    setRuntimeStatus,
     setSettingsOpen,
     setSettingsTab,
     setTitle,
     stopRequestedRef,
+    streamImportFile,
   });
 
   const downloadMeetingFile = useCallback(

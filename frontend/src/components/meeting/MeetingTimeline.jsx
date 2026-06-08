@@ -139,7 +139,7 @@ export function MeetingTimeline({
       setWaveformProgress(0);
       return undefined;
     }
-    if (matchingImportPreview?.loading && importPreviewWaveform) {
+    if (matchingImportPreview?.loading) {
       setAudioWaveform(null);
       setWaveformLoading(false);
       setWaveformProgress(0);

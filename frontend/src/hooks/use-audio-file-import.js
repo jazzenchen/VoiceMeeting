@@ -1,22 +1,8 @@
 import { useCallback } from "react";
 import { api } from "@/lib/api-client";
-import { audioBufferToMono } from "@/lib/audio-processing";
 import { userFriendlyError } from "@/lib/error-messages";
 import { titleFromAudioFile } from "@/lib/meeting-state";
-import { waveformFromSamples } from "@/lib/timeline-model";
-
-async function decodeAudioFile(file) {
-  const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContextCtor) {
-    throw new Error("当前浏览器不支持读取这个音视频文件。");
-  }
-  const context = new AudioContextCtor();
-  try {
-    return await context.decodeAudioData(await file.arrayBuffer());
-  } finally {
-    await context.close();
-  }
-}
+import { waveformFromBins } from "@/lib/timeline-model";
 
 async function stopImportedMeeting(id, { refreshMeeting, refreshMeetings, setMeeting }) {
   const stopped = await api(`/api/meetings/${id}/stop`, { method: "POST" });
@@ -30,14 +16,15 @@ export function useAudioFileImport({
   asrReady,
   asrUnavailableReason,
   chunkSeqRef,
-  enqueueChunk,
   ensureRecordingModels,
+  finalizeImportedMeeting,
   importingAudio,
   meetingIdRef,
   recording,
   refreshMeeting,
   refreshMeetings,
   serviceReady,
+  setRuntimeStatus,
   setError,
   setImportingAudio,
   setImportWaveformPreview,
@@ -48,6 +35,7 @@ export function useAudioFileImport({
   setSettingsTab,
   setTitle,
   stopRequestedRef,
+  streamImportFile,
 }) {
   return useCallback(
     async (event) => {
@@ -74,6 +62,7 @@ export function useAudioFileImport({
       setPipelineStatus("准备导入音视频");
       setImportWaveformPreview?.(null);
       stopRequestedRef.current = false;
+      let importMeetingId = "";
       try {
         if (!(await ensureRecordingModels())) return;
         setImportingAudio(true);
@@ -87,24 +76,29 @@ export function useAudioFileImport({
         setTitle(created.title || importedTitle);
         meetingIdRef.current = created.id;
         const id = created.id;
+        importMeetingId = id;
 
-        const audioBuffer = await decodeAudioFile(file);
-        const samples = audioBufferToMono(audioBuffer);
-        const durationMs = Math.max(1, Math.round((audioBuffer.duration || 0) * 1000));
-        const previewWaveform = waveformFromSamples(samples);
-        const updatePreview = (progress, loading = true) => {
+        let previewDurationMs = 0;
+        let previewWaveform = null;
+        const updatePreview = (progress, loading = true, next = {}) => {
+          if (Number(next.durationMs) > 0) {
+            previewDurationMs = Number(next.durationMs);
+          }
+          if (Object.prototype.hasOwnProperty.call(next, "waveform")) {
+            previewWaveform = next.waveform;
+          }
           setImportWaveformPreview?.((current) => {
             if (current?.meetingId && current.meetingId !== id) return current;
             return {
               meetingId: id,
-              durationMs,
+              durationMs: previewDurationMs || Number(current?.durationMs) || 0,
               waveform: previewWaveform,
               progress: Math.max(Number(current?.progress) || 0, Math.max(0, Math.min(1, progress))),
               loading,
             };
           });
         };
-        if (previewWaveform) updatePreview(0.035, true);
+        updatePreview(0.02, true);
         if (stopRequestedRef.current) {
           setPipelineStatus("已停止");
           await stopImportedMeeting(id, { refreshMeeting, refreshMeetings, setMeeting });
@@ -122,26 +116,77 @@ export function useAudioFileImport({
         }
 
         chunkSeqRef.current = 1;
-        await enqueueChunk(file, durationMs, {
+        let doneMeeting = null;
+        await streamImportFile(file, 0, {
           clientChunkId: `${id}-import-full`,
           filename: file.name,
           startedAtMs: 0,
-          endedAtMs: durationMs,
           cutReason: "导入完整音视频",
+        }, {
+          stage: ({ label, progress, runtime }) => {
+            if (runtime) setRuntimeStatus?.(runtime);
+            if (label) setPipelineStatus(label);
+            updatePreview(progress ?? 0.08, true);
+          },
+          waveform: (payload) => {
+            const bins = Array.isArray(payload?.bins) ? payload.bins : [];
+            const waveform = bins.length ? waveformFromBins(bins) : null;
+            updatePreview(payload?.progress ?? 0.08, true, {
+              durationMs: Number(payload?.duration_ms) || 0,
+              waveform,
+            });
+          },
+          segments: ({ meeting: updated, progress, runtime }) => {
+            if (runtime) setRuntimeStatus?.(runtime);
+            if (updated) setMeeting(updated);
+            updatePreview(progress ?? 0.5, true);
+            setPipelineStatus("文字已更新");
+          },
+          done: ({ meeting: updated, runtime }) => {
+            if (runtime) setRuntimeStatus?.(runtime);
+            if (updated) {
+              doneMeeting = updated;
+              setMeeting(updated);
+              setTitle(updated.title || "");
+            }
+            updatePreview(1, false, {
+              durationMs: Number(updated?.audio?.duration_ms) || previewDurationMs,
+            });
+          },
+          error: ({ error, runtime }) => {
+            if (runtime) setRuntimeStatus?.(runtime);
+            throw new Error(error || "导入失败。");
+          },
         });
-        updatePreview(1, !stopRequestedRef.current);
+        updatePreview(1, false);
 
         if (stopRequestedRef.current) {
           setPipelineStatus("已停止");
-        } else {
-          setPipelineStatus("已完成");
+          await refreshMeeting(id);
+          await refreshMeetings();
+          return;
         }
-        await stopImportedMeeting(id, { refreshMeeting, refreshMeetings, setMeeting });
-        updatePreview(1, false);
+
+        setPipelineStatus("已完成");
+        if (doneMeeting) {
+          setMeeting(doneMeeting);
+          setTitle(doneMeeting.title || "");
+        } else {
+          await refreshMeeting(id);
+        }
+        await refreshMeetings();
+        await finalizeImportedMeeting?.(id);
       } catch (err) {
         setImportWaveformPreview?.(null);
         if (err?.name === "AbortError") {
           setPipelineStatus("已停止");
+          if (importMeetingId) {
+            try {
+              await stopImportedMeeting(importMeetingId, { refreshMeeting, refreshMeetings, setMeeting });
+            } catch {
+              // The stream may already have marked the meeting stopped.
+            }
+          }
           return;
         }
         setPipelineStatus("导入失败");
@@ -154,13 +199,14 @@ export function useAudioFileImport({
     [
       asrReady,
       asrUnavailableReason,
-      enqueueChunk,
       ensureRecordingModels,
+      finalizeImportedMeeting,
       importingAudio,
       recording,
       refreshMeeting,
       refreshMeetings,
       serviceReady,
+      setRuntimeStatus,
       setError,
       setImportingAudio,
       setImportWaveformPreview,
@@ -170,6 +216,7 @@ export function useAudioFileImport({
       setSettingsOpen,
       setSettingsTab,
       setTitle,
+      streamImportFile,
     ],
   );
 }

@@ -277,7 +277,7 @@ function shapeAudioAmplitude(value, floor, ceiling) {
   return Math.max(0.018, Math.min(1, powerNorm * 0.86 + dbNorm * 0.14));
 }
 
-function waveformFromBins(bins) {
+export function waveformFromBins(bins) {
   const raw = bins.map((bin) => (bin.hasAudio ? Math.max(bin.peak * 0.82, bin.rms * 3.2) : 0));
   const floor = percentile(raw, 0.16) * 0.9;
   const ceiling = percentile(raw, 0.965);
