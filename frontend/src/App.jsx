@@ -1877,6 +1877,7 @@ function App() {
           if (updated) {
             finalized = updated;
             setMeeting(updated);
+            setTitle(updated.title || "");
           }
         },
         error: ({ error }) => {
@@ -1885,6 +1886,7 @@ function App() {
       });
       if (finalized) {
         setMeeting(finalized);
+        setTitle(finalized.title || "");
       } else {
         await refreshMeeting(id);
       }
