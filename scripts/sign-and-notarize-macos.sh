@@ -217,13 +217,23 @@ fi
 
 echo "Updating signed app bundle output..."
 rm -rf "$SOURCE_APP"
-ditto "$WORK_APP" "$SOURCE_APP"
+ditto --norsrc --noextattr "$WORK_APP" "$SOURCE_APP"
+clear_attrs "$SOURCE_APP"
+if [ "${VOICE_MEETING_SKIP_NOTARIZE:-0}" != "1" ]; then
+  xcrun stapler staple "$SOURCE_APP"
+  xcrun stapler validate "$SOURCE_APP"
+fi
 
 mkdir -p "$OUTPUT_DIR"
 rm -f "$DMG_PATH"
 rm -rf "$DMG_STAGING"
 mkdir -p "$DMG_STAGING"
-ditto "$WORK_APP" "$DMG_STAGING/VoiceMeeting.app"
+ditto --norsrc --noextattr "$SOURCE_APP" "$DMG_STAGING/VoiceMeeting.app"
+clear_attrs "$DMG_STAGING/VoiceMeeting.app"
+if [ "${VOICE_MEETING_SKIP_NOTARIZE:-0}" != "1" ]; then
+  xcrun stapler staple "$DMG_STAGING/VoiceMeeting.app"
+  xcrun stapler validate "$DMG_STAGING/VoiceMeeting.app"
+fi
 ln -s /Applications "$DMG_STAGING/Applications"
 find "$DMG_STAGING" -name '._*' -delete
 
