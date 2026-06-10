@@ -54,19 +54,6 @@ FINAL_PROMPT = """
 """.strip()
 
 
-FINAL_COMPACT_PROMPT = """
-上一版会议纪要输出不完整。请重新生成一份更精简但完整的中文 Markdown 会议纪要。
-事实来源只能是完整转写，不要依赖实时摘要或滚动纪要。
-只输出以下章节，不要输出“原始转写”：
-## 会议摘要
-## 关键议题
-## 结论/决定
-## 行动项
-## 待确认问题
-## 风险/阻塞
-每节最多 5 条，必须完整结束，不要编造。
-""".strip()
-
 TITLE_PROMPT = """
 你是会议标题助手。请根据会议纪要和转写摘录生成一个中文会议标题。
 要求：
@@ -76,15 +63,6 @@ TITLE_PROMPT = """
 4. 不要编造材料中没有出现的信息。
 """.strip()
 
-
-FINAL_REQUIRED_HEADINGS = [
-    "会议摘要",
-    "关键议题",
-    "结论/决定",
-    "行动项",
-    "待确认问题",
-    "风险/阻塞",
-]
 
 KEY_TOPIC_TERMS = (
     "AI",
@@ -153,7 +131,6 @@ DEFAULT_PROMPTS = {
     "asr_context": ASR_CONTEXT_PROMPT,
     "incremental_summary": SYSTEM_PROMPT,
     "final_notes": FINAL_PROMPT,
-    "final_notes_compact": FINAL_COMPACT_PROMPT,
     "meeting_title": TITLE_PROMPT,
     "transcript_repair": REPAIR_PROMPT,
     "meeting_qa": ASK_PROMPT,
@@ -175,11 +152,6 @@ DEFAULT_PROMPT_META = [
         "key": "final_notes",
         "label": "生成纪要",
         "description": "用于根据完整文字稿生成最终 Markdown 会议纪要。",
-    },
-    {
-        "key": "final_notes_compact",
-        "label": "精简纪要兜底",
-        "description": "当纪要输出不完整时使用，要求更短但章节完整。",
     },
     {
         "key": "meeting_title",
@@ -366,36 +338,6 @@ def _trim_generated_markdown(text: str) -> str:
     return cleaned.strip()
 
 
-def _has_heading(markdown: str, heading: str) -> bool:
-    return bool(re.search(rf"^##\s+{re.escape(heading)}\s*$", markdown, flags=re.M))
-
-
-def final_markdown_looks_incomplete(markdown: str, require_transcript: bool = False) -> bool:
-    text = _strip_markdown_fence(markdown)
-    if not text:
-        return True
-    required = list(FINAL_REQUIRED_HEADINGS)
-    if require_transcript:
-        required.append("原始转写")
-    if any(not _has_heading(text, heading) for heading in required):
-        return True
-    if text.count("```") % 2 == 1:
-        return True
-
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if not lines:
-        return True
-    last_line = lines[-1]
-    if last_line[-1:] in {"，", "、", "；", "：", ",", ";", ":", "(", "（"}:
-        return True
-    bullet = re.match(r"^[-*]\s+(.+)$", last_line)
-    if bullet:
-        item = bullet.group(1).strip()
-        if item not in {"暂无", "无", "待确认"} and len(item) < 8:
-            return True
-    return False
-
-
 def _transcript_lines(meeting: Dict[str, Any]) -> List[str]:
     lines = []
     for segment in meeting.get("utterances") or meeting.get("segments", []):
@@ -431,7 +373,7 @@ def compose_final_markdown(meeting: Dict[str, Any], generated: str = "") -> str:
     title = meeting.get("title") or "Untitled Meeting"
     created = meeting.get("created_at") or datetime.utcnow().isoformat()
     body = _trim_generated_markdown(generated)
-    if final_markdown_looks_incomplete(body):
+    if not body:
         body = _trim_generated_markdown(build_local_markdown(meeting, include_transcript=False))
 
     lines = [f"# {title}", "", f"- 时间：{created}", ""]
@@ -598,18 +540,12 @@ class MeetingSummarizer:
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]
         try:
-            markdown = await self.client.chat(messages, timeout=120.0)
-            if final_markdown_looks_incomplete(markdown):
-                messages = [
-                    {"role": "system", "content": self.prompt_for_meeting("final_notes_compact", FINAL_COMPACT_PROMPT, meeting)},
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-                ]
-                markdown = await self.client.chat(messages, timeout=120.0)
-            if markdown.strip() and not final_markdown_looks_incomplete(markdown):
-                return compose_final_markdown(meeting, markdown)
+            markdown = await self.client.chat(messages, timeout=600.0)
         except Exception as exc:
             raise RuntimeError(f"纪要生成失败：{friendly_llm_error(exc)}") from exc
-        raise RuntimeError("纪要生成失败：模型接口没有返回完整纪要。")
+        if not markdown.strip():
+            raise RuntimeError("纪要生成失败：模型接口没有返回内容。")
+        return compose_final_markdown(meeting, markdown)
 
     async def finalize_stream(self, meeting: Dict[str, Any]) -> AsyncIterator[Dict[str, str]]:
         transcript = _transcript_for_prompt(meeting)
@@ -632,15 +568,15 @@ class MeetingSummarizer:
 
         generated_parts: List[str] = []
         try:
-            async for chunk in self.client.chat_stream(messages, timeout=120.0):
+            async for chunk in self.client.chat_stream(messages, timeout=600.0):
                 generated_parts.append(chunk)
                 yield {"type": "chunk", "text": chunk}
-            generated = "".join(generated_parts)
-            if final_markdown_looks_incomplete(generated):
-                raise RuntimeError("模型接口没有返回完整纪要。")
-            markdown = compose_final_markdown(meeting, generated)
         except Exception as exc:
             raise RuntimeError(f"纪要生成失败：{friendly_llm_error(exc)}") from exc
+        generated = "".join(generated_parts)
+        if not generated.strip():
+            raise RuntimeError("纪要生成失败：模型接口没有返回内容。")
+        markdown = compose_final_markdown(meeting, generated)
 
         yield {"type": "replace", "markdown": markdown}
         yield {"type": "done", "markdown": markdown}

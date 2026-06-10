@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 import uuid
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional
@@ -187,19 +186,15 @@ class VibeAroundClient:
         payload = self._websocket_payload(messages)
         system_errors: List[str] = []
         emitted = False
-        deadline = time.monotonic() + timeout
         async with websockets.connect(url, ping_interval=None, open_timeout=10) as ws:
             try:
-                await asyncio.wait_for(
-                    ws.recv(), min(10.0, max(1.0, deadline - time.monotonic()))
-                )
+                await asyncio.wait_for(ws.recv(), min(10.0, max(1.0, timeout)))
             except Exception:
                 pass
             await ws.send(json.dumps(payload, ensure_ascii=False))
 
-            while time.monotonic() < deadline:
-                remaining = max(1.0, deadline - time.monotonic())
-                raw = await asyncio.wait_for(ws.recv(), remaining)
+            while True:
+                raw = await asyncio.wait_for(ws.recv(), max(1.0, timeout))
                 event = json.loads(raw)
                 kind = event.get("kind")
                 if kind == "session_ready":
