@@ -139,7 +139,7 @@ recording_model_load_error = ""
 llm_status_cache: Dict[str, Any] = {"updated_at": 0.0, "value": {}}
 llm_status_lock = asyncio.Lock()
 LLM_STATUS_TTL_SECONDS = 10.0
-SUMMARY_TASK_TIMEOUT_SECONDS = 300.0
+SUMMARY_TASK_TIMEOUT_SECONDS = 660.0
 SUMMARY_STALE_SECONDS = 300.0
 
 
